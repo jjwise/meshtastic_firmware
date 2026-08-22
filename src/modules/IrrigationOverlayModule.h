@@ -8,25 +8,25 @@
 #include "modules/irrigation/IrrigationConfig.h"
 #include "modules/irrigation/IrrigationModule.h"
 
-class IrrigationOverlayModule : public SinglePortModule, private concurrency::OSThread
-{
-  public:
-    IrrigationOverlayModule();
-    virtual int32_t runOnce() override;
+class IrrigationOverlayModule : public SinglePortModule, private concurrency::OSThread {
+ public:
+  IrrigationOverlayModule();
+  virtual int32_t runOnce() override;
 
-  protected:
-    virtual ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
+ protected:
+  virtual ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override;
 
-  private:
-    IrrigationConfig makeRuntimeConfig() const;
-    IrrigationSensorSample readSensorSampleFromNodeDb() const;
-    uint64_t nowMs() const;
-    bool trySendPendingMeshTx();
+ private:
+  void ensureInitialized();
+  IrrigationConfig makeRuntimeConfig() const;
+  IrrigationSensorSample readSensorSampleFromNodeDb() const;
+  uint64_t nowMs() const;
+  bool trySendPendingMeshTx();
 
-    IrrigationModule irrigation_;
+  IrrigationModule irrigation_;
+  bool initialized_;
 };
 
 extern IrrigationOverlayModule *irrigationOverlayModule;
 
 #endif
-

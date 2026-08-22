@@ -66,6 +66,32 @@ Observable<esp_sleep_wakeup_cause_t> notifyLightSleepEnd;
 // deep sleep support
 RTC_DATA_ATTR int bootCount = 0;
 
+#ifdef ARCH_ESP32
+namespace
+{
+constexpr uint32_t RESET_DIAGNOSTIC_MAGIC = 0x49525244; // "IRRD"
+
+// RTC no-init memory avoids flash writes during an unstable-power boot loop.
+// It normally survives brownout/deep-sleep resets, but not a complete loss of power.
+RTC_NOINIT_ATTR uint32_t resetDiagnosticMagic;
+RTC_NOINIT_ATTR uint32_t brownoutResetCount;
+RTC_NOINIT_ATTR uint32_t watchdogResetCount;
+
+char bootResetDiagnostic[96] = {};
+bool bootResetDiagnosticAvailable = false;
+} // namespace
+
+bool hasBootResetDiagnostic()
+{
+    return bootResetDiagnosticAvailable;
+}
+
+const char *getBootResetDiagnostic()
+{
+    return bootResetDiagnostic;
+}
+#endif
+
 // -----------------------------------------------------------------------------
 // Application
 // -----------------------------------------------------------------------------
@@ -113,6 +139,15 @@ void initDeepSleep()
     const char *reason;
     wakeCause = esp_sleep_get_wakeup_cause();
 
+    if (resetDiagnosticMagic != RESET_DIAGNOSTIC_MAGIC) {
+        resetDiagnosticMagic = RESET_DIAGNOSTIC_MAGIC;
+        brownoutResetCount = 0;
+        watchdogResetCount = 0;
+    }
+
+    bootResetDiagnostic[0] = '\0';
+    bootResetDiagnosticAvailable = false;
+
     switch (wakeCause) {
     case ESP_SLEEP_WAKEUP_EXT0:
         reason = "ext0 RTC_IO";
@@ -145,14 +180,30 @@ void initDeepSleep()
     // If we booted because our timer ran out or the user pressed reset, send those as fake events
     RESET_REASON hwReason = rtc_get_reset_reason(0);
 
-    if (hwReason == RTCWDT_BROWN_OUT_RESET)
+    if (hwReason == RTCWDT_BROWN_OUT_RESET) {
         reason = "brownout";
+        brownoutResetCount++;
+        snprintf(bootResetDiagnostic, sizeof(bootResetDiagnostic), "BROWNOUT RESET\nCount: %lu\nCheck battery",
+                 (unsigned long)brownoutResetCount);
+        bootResetDiagnosticAvailable = true;
+    }
 
-    if (hwReason == TG0WDT_SYS_RESET)
+    if (hwReason == TG0WDT_SYS_RESET || hwReason == TG0WDT_CPU_RESET) {
         reason = "taskWatchdog";
+        watchdogResetCount++;
+        snprintf(bootResetDiagnostic, sizeof(bootResetDiagnostic), "WATCHDOG RESET\nTask watchdog\nCount: %lu",
+                 (unsigned long)watchdogResetCount);
+        bootResetDiagnosticAvailable = true;
+    }
 
-    if (hwReason == TG1WDT_SYS_RESET)
+    if (hwReason == TG1WDT_SYS_RESET || hwReason == TG1WDT_CPU_RESET || hwReason == RTCWDT_SYS_RESET ||
+        hwReason == RTCWDT_CPU_RESET || hwReason == RTCWDT_RTC_RESET || hwReason == SUPER_WDT_RESET) {
         reason = "intWatchdog";
+        watchdogResetCount++;
+        snprintf(bootResetDiagnostic, sizeof(bootResetDiagnostic), "WATCHDOG RESET\nSystem watchdog\nCount: %lu",
+                 (unsigned long)watchdogResetCount);
+        bootResetDiagnosticAvailable = true;
+    }
 
     LOG_INFO("Booted, wake cause %d (boot count %d), reset_reason=%s", wakeCause, bootCount, reason);
 #endif

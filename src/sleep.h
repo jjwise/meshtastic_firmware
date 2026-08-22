@@ -10,6 +10,10 @@ void doDeepSleep(uint32_t msecToWake, bool skipPreflight, bool skipSaveNodeDb), 
 #include "esp_sleep.h"
 esp_sleep_wakeup_cause_t doLightSleep(uint64_t msecToWake);
 
+// Abnormal reset captured before the display and radios are initialized.
+bool hasBootResetDiagnostic();
+const char *getBootResetDiagnostic();
+
 extern esp_sleep_source_t wakeCause;
 #endif
 

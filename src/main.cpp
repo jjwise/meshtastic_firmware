@@ -948,6 +948,13 @@ void setup()
 #endif
 #endif
 
+#ifdef ARCH_ESP32
+    // Show power/watchdog failures before LoRa and Wi-Fi add their startup load.
+    if (screen && hasBootResetDiagnostic()) {
+        screen->showSimpleBanner(getBootResetDiagnostic(), 10000);
+    }
+#endif
+
     auto rIf = initLoRa();
 
     lateInitVariant(); // Do board specific init (see extra_variants/README.md for documentation)
