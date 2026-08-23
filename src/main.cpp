@@ -34,6 +34,9 @@
 #include "mesh/generated/meshtastic/config.pb.h"
 #include "meshUtils.h"
 #include "modules/Modules.h"
+#if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
+#include "modules/irrigation/IrrigationWiFiBootstrap.h"
+#endif
 #include "sleep.h"
 #include "target_specific.h"
 #include <memory>
@@ -974,6 +977,10 @@ void setup()
 
         // Initialize Wifi
 #if HAS_WIFI
+#if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
+    // Override any stale Meshtastic credentials before WifiConnect is created.
+    applyIrrigationGatewayWiFiBootstrap();
+#endif
     initWifi();
 #endif
 
