@@ -127,7 +127,10 @@ int32_t ExternalNotificationModule::runOnce()
 #endif
 
 #ifdef HAS_DRV2605
-            drv.go();
+            // Only trigger DRV2605 if vibration alerts are enabled
+            if (moduleConfig.external_notification.alert_message_vibra || moduleConfig.external_notification.alert_bell_vibra) {
+                drv.go();
+            }
 #endif
         }
 
@@ -144,7 +147,7 @@ int32_t ExternalNotificationModule::runOnce()
         }
 #endif
         // now let the PWM buzzer play
-        if (moduleConfig.external_notification.use_pwm && config.device.buzzer_gpio && canBuzz()) {
+        if (moduleConfig.external_notification.use_pwm && config.device.buzzer_gpio && canBuzz() && buzzerShouldAlert) {
             if (rtttl::isPlaying()) {
                 rtttl::play();
             } else if (isNagging && (nagCycleCutoff >= millis())) {
@@ -203,6 +206,14 @@ void ExternalNotificationModule::setExternalState(uint8_t index, bool on)
     default:
         if (output > 0)
             digitalWrite(output, (moduleConfig.external_notification.active ? on : !on));
+#ifdef PCA_LED_NOTIFICATION
+        io.digitalWrite(PCA_LED_NOTIFICATION, on);
+
+#endif
+#ifdef NEOPIXEL_STATUS_NOTIFICATION_PIN
+        notificationPixel.setPixelColor(0, on ? NEOPIXEL_STATUS_NOTIFICATION_COLOR : 0);
+        notificationPixel.show();
+#endif
         break;
     }
 
@@ -217,9 +228,18 @@ void ExternalNotificationModule::setExternalState(uint8_t index, bool on)
 #endif
 
 #ifdef HAS_DRV2605
+    // Only trigger DRV2605 when setting vibration motor
+    bool shouldTriggerDRV = false;
     if (on) {
+        if (index == 1 &&
+            (moduleConfig.external_notification.alert_message_vibra || moduleConfig.external_notification.alert_bell_vibra)) {
+            shouldTriggerDRV = true;
+        }
+    }
+
+    if (shouldTriggerDRV) {
         drv.go();
-    } else {
+    } else if (!on && index == 1) {
         drv.stop();
     }
 #endif
@@ -258,6 +278,7 @@ void ExternalNotificationModule::stopNow()
 
     // Prevent the state machine from immediately re-triggering outputs after a manual stop.
     isNagging = false;
+    buzzerShouldAlert = false;
     nagCycleCutoff = UINT32_MAX;
 
 #ifdef HAS_I2S
@@ -320,6 +341,12 @@ ExternalNotificationModule::ExternalNotificationModule()
             LOG_INFO("Use Pin %i in digital mode", output);
             pinMode(output, OUTPUT);
         }
+#ifdef NEOPIXEL_STATUS_NOTIFICATION_PIN
+        LOG_INFO("Use WS2812 on GPIO %d as notification LED", NEOPIXEL_STATUS_NOTIFICATION_PIN);
+        notificationPixel.begin();
+        notificationPixel.clear();
+        notificationPixel.show();
+#endif
         setExternalState(0, false);
         externalTurnedOn[0] = 0;
         if (moduleConfig.external_notification.output_vibra) {
@@ -350,12 +377,6 @@ ProcessMessage ExternalNotificationModule::handleReceived(const meshtastic_MeshP
 {
     // Trigger external notification if enabled and not muted; isSilenced is from temporary mute toggles
     if (moduleConfig.external_notification.enabled && !isSilenced) {
-#ifdef T_WATCH_S3
-        drv.setWaveform(0, 75);
-        drv.setWaveform(1, 56);
-        drv.setWaveform(2, 0);
-        drv.go();
-#endif
         if (!isFromUs(&mp)) {
             // Check if the message contains a bell character. Don't do this loop for every pin, just once.
             auto &p = mp.decoded;
@@ -380,60 +401,71 @@ ProcessMessage ExternalNotificationModule::handleReceived(const meshtastic_MeshP
             const bool buzzerModeIsDirectOnly =
                 (config.device.buzzer_mode == meshtastic_Config_DeviceConfig_BuzzerMode_DIRECT_MSG_ONLY);
 
-            if (containsBell || !is_muted) {
-                if (moduleConfig.external_notification.alert_bell || moduleConfig.external_notification.alert_message ||
-                    moduleConfig.external_notification.alert_bell_vibra ||
-                    moduleConfig.external_notification.alert_message_vibra ||
-                    ((moduleConfig.external_notification.alert_bell_buzzer ||
-                      moduleConfig.external_notification.alert_message_buzzer) &&
-                     canBuzz())) {
-                    nagCycleCutoff = millis() + (moduleConfig.external_notification.nag_timeout
-                                                     ? (moduleConfig.external_notification.nag_timeout * 1000)
-                                                     : moduleConfig.external_notification.output_ms);
-                    LOG_INFO("Toggling nagCycleCutoff to %lu", nagCycleCutoff);
-                    isNagging = true;
-                }
+            // Each output evaluates its own alert condition independently:
+            // alert_bell_* fires only when a bell character is present.
+            // alert_message_* fires on any non-muted message.
 
-                if (moduleConfig.external_notification.alert_bell || moduleConfig.external_notification.alert_message) {
-                    LOG_INFO("externalNotificationModule - Notification Module or Bell");
-                    setExternalState(0, true);
-                }
+            // Alert when receiving a bell = alertBell: true
+            // Alert when receiving a message = alertMessage: true
+            const bool genericShouldAlert = (moduleConfig.external_notification.alert_bell && containsBell) ||
+                                            (moduleConfig.external_notification.alert_message && !is_muted);
 
-                if (moduleConfig.external_notification.alert_bell_vibra ||
-                    moduleConfig.external_notification.alert_message_vibra) {
-                    LOG_INFO("externalNotificationModule - Notification Module or Bell (Vibra)");
-                    setExternalState(1, true);
-                }
+            // Alert GPIO Vibra when receiving a bell = alertBellVibra: true
+            // Alert GPIO Vibra when receiving a message = alertMessageVibra: true
+            const bool vibraShouldAlert = (moduleConfig.external_notification.alert_bell_vibra && containsBell) ||
+                                          (moduleConfig.external_notification.alert_message_vibra && !is_muted);
 
-                if ((moduleConfig.external_notification.alert_bell_buzzer ||
-                     moduleConfig.external_notification.alert_message_buzzer) &&
-                    canBuzz()) {
-                    LOG_INFO("externalNotificationModule - Notification Module or Bell (Buzzer)");
-                    if (buzzerModeIsDirectOnly && !isDmToUs && !containsBell) {
-                        LOG_INFO("Message buzzer was suppressed because buzzer mode DIRECT_MSG_ONLY");
-                    } else {
-                        // Buzz if buzzer mode is not in DIRECT_MSG_ONLY or is DM to us
-#ifdef T_LORA_PAGER
-                        drv.setWaveform(0, 16); // Long buzzer 100%
-                        drv.setWaveform(1, 0);  // Pause
-                        drv.setWaveform(2, 16);
-                        drv.setWaveform(3, 0);
-                        drv.setWaveform(4, 16);
-                        drv.setWaveform(5, 0);
-                        drv.setWaveform(6, 16);
-                        drv.setWaveform(7, 0);
-                        drv.go();
+            // Alert GPIO Buzzer when receiving a bell = alertBellBuzzer: true
+            // Alert GPIO Buzzer when receiving a message = alertMessageBuzzer: true
+            // If you are already buzzing, keep going
+            buzzerShouldAlert =
+                buzzerShouldAlert || (canBuzz() && ((moduleConfig.external_notification.alert_bell_buzzer && containsBell) ||
+                                                    (moduleConfig.external_notification.alert_message_buzzer && !is_muted)));
+
+            if (genericShouldAlert || vibraShouldAlert || buzzerShouldAlert) {
+                nagCycleCutoff = millis() + (moduleConfig.external_notification.nag_timeout
+                                                 ? (moduleConfig.external_notification.nag_timeout * 1000)
+                                                 : moduleConfig.external_notification.output_ms);
+                LOG_INFO("Toggling nagCycleCutoff to %lu", nagCycleCutoff);
+                isNagging = true;
+            }
+
+            if (genericShouldAlert) {
+                LOG_INFO("externalNotificationModule - Generic alert");
+                setExternalState(0, true);
+            }
+
+            if (vibraShouldAlert) {
+                LOG_INFO("externalNotificationModule - Vibra alert");
+#ifdef HAS_DRV2605
+                // Set DRV2605 waveform when vibration alert is triggered
+                drv.setWaveform(0, 16); // Long buzzer 100%
+                drv.setWaveform(1, 0);  // Pause
+                drv.setWaveform(2, 16);
+                drv.setWaveform(3, 0);
+                drv.setWaveform(4, 16);
+                drv.setWaveform(5, 0);
+                drv.setWaveform(6, 16);
+                drv.setWaveform(7, 0);
+                drv.go();
 #endif
+                setExternalState(1, true);
+            }
+
+            if (buzzerShouldAlert) {
+                LOG_INFO("externalNotificationModule - Buzzer alert");
+                if (buzzerModeIsDirectOnly && !isDmToUs && !containsBell) {
+                    LOG_INFO("Message buzzer was suppressed because buzzer mode DIRECT_MSG_ONLY");
+                } else {
+                    // Buzz if buzzer mode is not in DIRECT_MSG_ONLY or is DM to us
+                    if (moduleConfig.external_notification.use_i2s_as_buzzer) {
 #ifdef HAS_I2S
-                        if (moduleConfig.external_notification.use_i2s_as_buzzer) {
-                            audioThread->beginRttl(rtttlConfig.ringtone, strlen_P(rtttlConfig.ringtone));
-                        } else
+                        audioThread->beginRttl(rtttlConfig.ringtone, strlen_P(rtttlConfig.ringtone));
 #endif
-                            if (moduleConfig.external_notification.use_pwm) {
-                            rtttl::begin(config.device.buzzer_gpio, rtttlConfig.ringtone);
-                        } else {
-                            setExternalState(2, true);
-                        }
+                    } else if (moduleConfig.external_notification.use_pwm) {
+                        rtttl::begin(config.device.buzzer_gpio, rtttlConfig.ringtone);
+                    } else {
+                        setExternalState(2, true);
                     }
                 }
             }

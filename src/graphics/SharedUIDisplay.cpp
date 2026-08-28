@@ -27,6 +27,12 @@ ScreenResolution determineScreenResolution(int16_t screenheight, int16_t screenw
         return ScreenResolution::UltraLow;
     }
 
+#ifdef DISPLAY_FORCE_SMALL_FONTS
+    if (screenwidth <= 160 && screenheight <= 80) {
+        return ScreenResolution::Low;
+    }
+#endif
+
     // Standard OLED screens
     if (screenwidth > 128 && screenheight <= 64) {
         return ScreenResolution::Low;
@@ -121,11 +127,10 @@ void drawCommonHeader(OLEDDisplay *display, int16_t x, int16_t y, const char *ti
         }
 
         // === Screen Title ===
-        display->setTextAlignment(TEXT_ALIGN_CENTER);
-        display->drawString(SCREEN_WIDTH / 2, y, titleStr);
-        if (config.display.heading_bold) {
-            display->drawString((SCREEN_WIDTH / 2) + 1, y, titleStr);
-        }
+        const char *headerTitle = titleStr ? titleStr : "";
+        const int titleWidth = UIRenderer::measureStringWithEmotes(display, headerTitle);
+        const int titleX = (SCREEN_WIDTH - titleWidth) / 2;
+        UIRenderer::drawStringWithEmotes(display, titleX, y, headerTitle, FONT_HEIGHT_SMALL, 1, config.display.heading_bold);
     }
     display->setTextAlignment(TEXT_ALIGN_LEFT);
 
@@ -156,7 +161,7 @@ void drawCommonHeader(OLEDDisplay *display, int16_t x, int16_t y, const char *ti
 
     int batteryX = 1;
     int batteryY = HEADER_OFFSET_Y + 1;
-#if !defined(M5STACK_UNITC6L)
+#if !defined(OLED_TINY)
     // === Battery Icons ===
     if (usbPowered && !isCharging) { // This is a basic check to determine USB Powered is flagged but not charging
         batteryX += 1;
