@@ -158,6 +158,7 @@ bool run_tcp_write_probe(const String &host, uint16_t port) {
 #endif
 #endif
 
+#if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
 bool gateway_prefers_wifi(const IrrigationConfig &config) {
   return config.node_profile == IrrigationNodeProfile::GATEWAY_CENTRAL && !config.wifi_ssid.isEmpty();
 }
@@ -225,6 +226,7 @@ String normalize_mqtt_host(const String &raw_host) {
 
   return host;
 }
+#endif
 }  // namespace
 
 #if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
@@ -258,6 +260,8 @@ IrrigationMqttUplink::IrrigationMqttUplink()
       last_mqtt_attempt_ms_(0),
       wifi_reported_connected_(false),
       mqtt_reported_connected_(false),
+      command_subscription_active_(false),
+      command_pending_(false),
       native_wifi_started_(false),
       mqtt_uses_tls_(true),
       last_wifi_status_(WL_IDLE_STATUS) {}
@@ -266,6 +270,8 @@ IrrigationMqttUplink::IrrigationMqttUplink()
       last_mqtt_attempt_ms_(0),
       wifi_reported_connected_(false),
       mqtt_reported_connected_(false),
+      command_subscription_active_(false),
+      command_pending_(false),
       native_wifi_started_(false),
       mqtt_uses_tls_(false),
       last_wifi_status_(0) {}
@@ -305,6 +311,8 @@ bool IrrigationMqttUplink::begin(const IrrigationConfig &config) {
   mqtt_client_->setKeepAliveInterval(60 * 1000UL);
   mqtt_client_->setConnectionTimeout(15 * 1000UL);
   mqtt_client_->setTxPayloadSize(512);
+  command_subscription_active_ = false;
+  command_pending_ = false;
   LOG_INFO("Irrigation MQTT transport: tls=%d port=%u", mqtt_uses_tls_ ? 1 : 0, config_.mqtt_port);
   native_wifi_started_ = ensure_native_wifi_started();
   last_wifi_status_ = WiFi.status();
@@ -362,7 +370,8 @@ void IrrigationMqttUplink::tick(uint64_t now_ms) {
   }
   ensure_mqtt_connected(now_ms);
   if (mqtt_client_ != nullptr && mqtt_client_->connected()) {
-    mqtt_client_->poll();
+    ensure_command_subscription();
+    poll_command_message();
   }
 #else
   (void)now_ms;
@@ -408,6 +417,78 @@ bool IrrigationMqttUplink::publish_payload(const String &topic, const String &pa
   (void)payload;
   (void)qos_level;
   return false;
+#endif
+}
+
+bool IrrigationMqttUplink::pop_received_command(String &topic, String &payload) {
+#if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
+  if (!command_pending_) {
+    return false;
+  }
+  topic = command_topic_;
+  payload = command_payload_;
+  command_topic_ = "";
+  command_payload_ = "";
+  command_pending_ = false;
+  return true;
+#else
+  (void)topic;
+  (void)payload;
+  return false;
+#endif
+}
+
+bool IrrigationMqttUplink::ensure_command_subscription() {
+#if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
+  if (command_subscription_active_) {
+    return true;
+  }
+  if (mqtt_client_ == nullptr || !mqtt_client_->connected()) {
+    return false;
+  }
+  const String topic = "farm/" + config_.farm_id + "/nodes/+/commands";
+  const bool subscribed = mqtt_client_->subscribe(topic, 1) == 1;
+  command_subscription_active_ = subscribed;
+  if (subscribed) {
+    LOG_INFO("Irrigation MQTT subscribed: topic=%s qos=1", topic.c_str());
+  } else {
+    LOG_WARN("Irrigation MQTT subscribe failed: topic=%s", topic.c_str());
+  }
+  return subscribed;
+#else
+  return false;
+#endif
+}
+
+void IrrigationMqttUplink::poll_command_message() {
+#if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
+  if (command_pending_ || mqtt_client_ == nullptr || !mqtt_client_->connected()) {
+    return;
+  }
+
+  const int message_size = mqtt_client_->parseMessage();
+  if (message_size <= 0) {
+    return;
+  }
+  const String topic = mqtt_client_->messageTopic();
+  const int retained = mqtt_client_->messageRetain();
+  String payload;
+  payload.reserve(static_cast<unsigned int>(message_size));
+  while (mqtt_client_->available()) {
+    payload += static_cast<char>(mqtt_client_->read());
+  }
+
+  const String prefix = "farm/" + config_.farm_id + "/nodes/";
+  const bool valid_topic = topic.startsWith(prefix) && topic.endsWith("/commands");
+  if (!valid_topic || retained == 1 || payload.length() > 512) {
+    LOG_WARN("Irrigation MQTT command dropped: topic=%s retained=%d bytes=%u",
+             topic.c_str(), retained, payload.length());
+    return;
+  }
+  command_topic_ = topic;
+  command_payload_ = payload;
+  command_pending_ = true;
+  LOG_INFO("Irrigation MQTT command received: topic=%s bytes=%u", topic.c_str(), payload.length());
 #endif
 }
 
@@ -485,6 +566,7 @@ bool IrrigationMqttUplink::ensure_mqtt_connected(uint64_t now_ms) {
   }
   if (mqtt_reported_connected_) {
     mqtt_reported_connected_ = false;
+    command_subscription_active_ = false;
     LOG_WARN("Irrigation MQTT disconnected: connect_error=%d",
              mqtt_client_ != nullptr ? mqtt_client_->connectError() : -1);
   }
@@ -542,6 +624,10 @@ bool IrrigationMqttUplink::ensure_mqtt_connected(uint64_t now_ms) {
     return false;
   }
   const bool connected = mqtt_client_->connect(config_.mqtt_host.c_str(), config_.mqtt_port) == 1;
+  if (connected) {
+    command_subscription_active_ = false;
+    ensure_command_subscription();
+  }
   if (!connected) {
     if (mqtt_uses_tls_) {
       char tls_error[96] = {0};

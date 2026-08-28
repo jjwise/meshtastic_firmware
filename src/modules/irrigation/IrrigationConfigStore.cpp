@@ -34,6 +34,10 @@ String profile_to_string(IrrigationNodeProfile profile) {
   switch (profile) {
     case IrrigationNodeProfile::ENDPOINT_POD:
       return "ENDPOINT_POD";
+    case IrrigationNodeProfile::BASIC_TRACKER:
+      return "BASIC_TRACKER";
+    case IrrigationNodeProfile::VALVE_ACTUATOR:
+      return "VALVE_ACTUATOR";
     case IrrigationNodeProfile::RELAY_FIXED:
       return "RELAY_FIXED";
     case IrrigationNodeProfile::GATEWAY_CENTRAL:
@@ -46,6 +50,14 @@ String profile_to_string(IrrigationNodeProfile profile) {
 bool parse_profile(const String &value, IrrigationNodeProfile &profile) {
   if (value.equalsIgnoreCase("ENDPOINT_POD")) {
     profile = IrrigationNodeProfile::ENDPOINT_POD;
+    return true;
+  }
+  if (value.equalsIgnoreCase("BASIC_TRACKER")) {
+    profile = IrrigationNodeProfile::BASIC_TRACKER;
+    return true;
+  }
+  if (value.equalsIgnoreCase("VALVE_ACTUATOR")) {
+    profile = IrrigationNodeProfile::VALVE_ACTUATOR;
     return true;
   }
   if (value.equalsIgnoreCase("RELAY_FIXED")) {
@@ -159,6 +171,9 @@ bool apply_config_value(IrrigationConfig &config, const String &key, const Strin
   if (key == "heartbeat_interval_sec") {
     return parse_u32(value, config.heartbeat_interval_sec);
   }
+  if (key == "position_interval_sec") {
+    return parse_u32(value, config.position_interval_sec);
+  }
   if (key == "stationary_interval_sec") {
     return parse_u32(value, config.stationary_interval_sec);
   }
@@ -188,6 +203,15 @@ bool apply_config_value(IrrigationConfig &config, const String &key, const Strin
   }
   if (key == "default_hop_limit") {
     return parse_u8(value, config.default_hop_limit);
+  }
+  if (key == "valve_control_pin") {
+    return parse_i32(value, config.valve_control_pin);
+  }
+  if (key == "valve_max_open_sec") {
+    return parse_u32(value, config.valve_max_open_sec);
+  }
+  if (key == "valve_active_high") {
+    return parse_bool(value, config.valve_active_high);
   }
   if (key == "max_hop_override") {
     return parse_u8(value, config.max_hop_override);
@@ -232,6 +256,7 @@ bool configs_equal(const IrrigationConfig &lhs, const IrrigationConfig &rhs) {
   return lhs.farm_id == rhs.farm_id && lhs.line_id == rhs.line_id && lhs.tracker_id == rhs.tracker_id &&
          lhs.endpoint_role == rhs.endpoint_role && lhs.node_profile == rhs.node_profile &&
          lhs.heartbeat_interval_sec == rhs.heartbeat_interval_sec &&
+         lhs.position_interval_sec == rhs.position_interval_sec &&
          lhs.stationary_interval_sec == rhs.stationary_interval_sec &&
          lhs.moving_interval_sec == rhs.moving_interval_sec && lhs.moving_hold_sec == rhs.moving_hold_sec &&
          lhs.settle_confirm_delay_sec == rhs.settle_confirm_delay_sec &&
@@ -240,6 +265,9 @@ bool configs_equal(const IrrigationConfig &lhs, const IrrigationConfig &rhs) {
          lhs.stable_fix_min_samples == rhs.stable_fix_min_samples &&
          lhs.stable_fix_max_hdop == rhs.stable_fix_max_hdop &&
          lhs.imu_interrupt_pin == rhs.imu_interrupt_pin &&
+         lhs.valve_control_pin == rhs.valve_control_pin &&
+         lhs.valve_max_open_sec == rhs.valve_max_open_sec &&
+         lhs.valve_active_high == rhs.valve_active_high &&
          lhs.default_hop_limit == rhs.default_hop_limit && lhs.max_hop_override == rhs.max_hop_override &&
          lhs.wifi_ssid == rhs.wifi_ssid && lhs.wifi_password == rhs.wifi_password &&
          lhs.mqtt_host == rhs.mqtt_host && lhs.mqtt_port == rhs.mqtt_port &&
@@ -331,6 +359,7 @@ bool IrrigationConfigStore::save(const IrrigationConfig &config) const {
   success = success && write_line(config_file, "endpoint_role", config.endpoint_role);
   success = success && write_line(config_file, "node_profile", profile_to_string(config.node_profile));
   success = success && write_line(config_file, "heartbeat_interval_sec", config.heartbeat_interval_sec);
+  success = success && write_line(config_file, "position_interval_sec", config.position_interval_sec);
   success = success && write_line(config_file, "stationary_interval_sec", config.stationary_interval_sec);
   success = success && write_line(config_file, "moving_interval_sec", config.moving_interval_sec);
   success = success && write_line(config_file, "moving_hold_sec", config.moving_hold_sec);
@@ -340,6 +369,9 @@ bool IrrigationConfigStore::save(const IrrigationConfig &config) const {
   success = success && write_line(config_file, "stable_fix_min_samples", static_cast<uint32_t>(config.stable_fix_min_samples));
   success = success && write_line(config_file, "stable_fix_max_hdop", String(config.stable_fix_max_hdop, 2));
   success = success && write_line(config_file, "imu_interrupt_pin", String(config.imu_interrupt_pin));
+  success = success && write_line(config_file, "valve_control_pin", String(config.valve_control_pin));
+  success = success && write_line(config_file, "valve_max_open_sec", config.valve_max_open_sec);
+  success = success && write_line(config_file, "valve_active_high", config.valve_active_high);
   success = success && write_line(config_file, "default_hop_limit", static_cast<uint32_t>(config.default_hop_limit));
   success = success && write_line(config_file, "max_hop_override", static_cast<uint32_t>(config.max_hop_override));
   success = success && write_line(config_file, "wifi_ssid", config.wifi_ssid);

@@ -4,8 +4,13 @@
 #define HELTEC_TRACKER_V1_X
 
 // I2C
+#ifndef I2C_SDA
 #define I2C_SDA SDA
+#endif
+
+#ifndef I2C_SCL
 #define I2C_SCL SCL
+#endif
 
 // ST7735S TFT LCD
 #define ST7735S 1 // there are different (sub-)versions of ST7735

@@ -16,11 +16,11 @@ void lateInitVariant()
 #else
     GpioVirtPin *virtGpsEnable = new GpioVirtPin();
 #endif
+    GpioVirtPin *virtScreenEnable = new GpioVirtPin();
 
 #ifndef MESHTASTIC_EXCLUDE_SCREEN
     // On this board we are actually using the backlightEnable signal to already be controlling a physical enable to the
     // display controller.  But we'd _ALSO_ like to have that signal drive a virtual GPIO.  So nest it as needed.
-    GpioVirtPin *virtScreenEnable = new GpioVirtPin();
     if (TFTDisplay::backlightEnable) {
         GpioPin *physScreenEnable = TFTDisplay::backlightEnable;
         GpioPin *splitter = new GpioSplitter(virtScreenEnable, physScreenEnable);

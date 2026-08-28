@@ -29,10 +29,14 @@ String node_num_hex(NodeNum node_num) {
   return value;
 }
 
-const char *profile_to_cstr(IrrigationNodeProfile profile) {
+__attribute__((unused)) const char *profile_to_cstr(IrrigationNodeProfile profile) {
   switch (profile) {
     case IrrigationNodeProfile::ENDPOINT_POD:
       return "ENDPOINT_POD";
+    case IrrigationNodeProfile::BASIC_TRACKER:
+      return "BASIC_TRACKER";
+    case IrrigationNodeProfile::VALVE_ACTUATOR:
+      return "VALVE_ACTUATOR";
     case IrrigationNodeProfile::RELAY_FIXED:
       return "RELAY_FIXED";
     case IrrigationNodeProfile::GATEWAY_CENTRAL:
@@ -95,6 +99,9 @@ void apply_build_overrides(IrrigationConfig &cfg) {
 #ifdef IRRIGATION_HEARTBEAT_INTERVAL_SEC
   cfg.heartbeat_interval_sec = static_cast<uint32_t>(IRRIGATION_HEARTBEAT_INTERVAL_SEC);
 #endif
+#ifdef IRRIGATION_POSITION_INTERVAL_SEC
+  cfg.position_interval_sec = static_cast<uint32_t>(IRRIGATION_POSITION_INTERVAL_SEC);
+#endif
 #ifdef IRRIGATION_MOVING_HOLD_SEC
   cfg.moving_hold_sec = static_cast<uint32_t>(IRRIGATION_MOVING_HOLD_SEC);
 #endif
@@ -116,6 +123,15 @@ void apply_build_overrides(IrrigationConfig &cfg) {
 #ifdef IRRIGATION_IMU_INTERRUPT_PIN
   cfg.imu_interrupt_pin = static_cast<int32_t>(IRRIGATION_IMU_INTERRUPT_PIN);
 #endif
+#ifdef IRRIGATION_VALVE_CONTROL_PIN
+  cfg.valve_control_pin = static_cast<int32_t>(IRRIGATION_VALVE_CONTROL_PIN);
+#endif
+#ifdef IRRIGATION_VALVE_MAX_OPEN_SEC
+  cfg.valve_max_open_sec = static_cast<uint32_t>(IRRIGATION_VALVE_MAX_OPEN_SEC);
+#endif
+#ifdef IRRIGATION_VALVE_ACTIVE_HIGH
+  cfg.valve_active_high = static_cast<bool>(IRRIGATION_VALVE_ACTIVE_HIGH);
+#endif
 #ifdef IRRIGATION_DEFAULT_HOP_LIMIT
   cfg.default_hop_limit = static_cast<uint8_t>(IRRIGATION_DEFAULT_HOP_LIMIT);
 #endif
@@ -133,6 +149,10 @@ void apply_build_overrides(IrrigationConfig &cfg) {
 IrrigationNodeProfile resolve_node_profile() {
 #if defined(IRRIGATION_PROFILE_GATEWAY_CENTRAL)
   return IrrigationNodeProfile::GATEWAY_CENTRAL;
+#elif defined(IRRIGATION_PROFILE_VALVE_ACTUATOR)
+  return IrrigationNodeProfile::VALVE_ACTUATOR;
+#elif defined(IRRIGATION_PROFILE_BASIC_TRACKER)
+  return IrrigationNodeProfile::BASIC_TRACKER;
 #elif defined(IRRIGATION_PROFILE_RELAY_FIXED)
   return IrrigationNodeProfile::RELAY_FIXED;
 #elif defined(IRRIGATION_PROFILE_ENDPOINT_POD)
@@ -172,6 +192,12 @@ int32_t IrrigationOverlayModule::runOnce() {
   irrigation_.on_sensor_sample(sample, now);
   irrigation_.tick(now);
   trySendPendingMeshTx();
+  IrrigationConfig updated_config;
+  if (irrigation_.pop_config_update(updated_config)) {
+    IrrigationConfigStore config_store;
+    const bool saved = config_store.begin(config_store_path()) && config_store.save(updated_config);
+    LOG_INFO("Irrigation runtime config persistence: saved=%d", saved ? 1 : 0);
+  }
   return k_run_interval_ms;
 }
 

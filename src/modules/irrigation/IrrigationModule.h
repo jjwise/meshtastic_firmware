@@ -32,6 +32,7 @@ class IrrigationModule {
 
   bool pop_next_mesh_tx(String &payload_json, uint8_t &hop_limit);
   bool has_pending_mesh_tx() const;
+  bool pop_config_update(IrrigationConfig &config);
 
  private:
   enum class EndpointLifecycleState {
@@ -52,8 +53,15 @@ class IrrigationModule {
 
   void maybe_enqueue_endpoint_event(uint64_t now_ms);
   void tick_endpoint(uint64_t now_ms);
+  void tick_basic_tracker(uint64_t now_ms);
+  void tick_valve_actuator(uint64_t now_ms);
   void maybe_publish_heartbeat(uint64_t now_ms);
   void process_post_motion_fix(uint64_t now_ms);
+  bool handle_command(const IrrigationCommand &command, uint64_t now_ms);
+  bool enqueue_command_result(const String &command_id, bool accepted, uint64_t now_ms);
+  bool enqueue_profile_status(IrrigationPublishReason publish_reason, uint64_t now_ms);
+  void set_valve_output(bool open);
+  void process_gateway_commands(size_t max_messages);
   bool enqueue_event_from_sample(
       IrrigationPublishReason publish_reason,
       const IrrigationSensorSample &sample,
@@ -88,6 +96,12 @@ class IrrigationModule {
   uint64_t last_good_fix_ms_;
   uint64_t last_heartbeat_publish_ms_;
   uint64_t last_endpoint_publish_ms_;
+  uint64_t last_profile_publish_ms_;
+  uint64_t valve_opened_ms_;
+  uint32_t valve_open_duration_sec_;
+  bool valve_open_;
+  bool last_command_accepted_;
+  bool config_update_pending_;
   uint64_t motion_cycle_start_ms_;
   uint64_t settle_confirm_due_ms_;
   uint32_t sequence_;
@@ -101,4 +115,6 @@ class IrrigationModule {
   std::vector<PendingMeshTx> pending_mesh_tx_;
   std::vector<PendingGatewayRx> pending_gateway_rx_;
   uint64_t last_gateway_flush_ms_;
+  uint64_t last_command_issued_at_utc_ms_;
+  String last_command_id_;
 };

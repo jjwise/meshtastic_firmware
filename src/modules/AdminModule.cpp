@@ -234,7 +234,7 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         break;
     }
     case meshtastic_AdminMessage_ota_request_tag: {
-#if defined(ARCH_ESP32)
+#if defined(ARCH_ESP32) && !MESHTASTIC_EXCLUDE_WIFI
         LOG_INFO("OTA Requested");
 
         if (r->ota_request.ota_hash.size != 32) {
@@ -276,6 +276,10 @@ bool AdminModule::handleReceivedProtobuf(const meshtastic_MeshPacket &mp, meshta
         } else {
             sendWarningAndLog("Unable to switch to the OTA partition.");
         }
+#elif defined(ARCH_ESP32)
+        suppressRebootBanner = true;
+        sendWarningAndLog("Cannot start OTA: WiFi support is excluded from this firmware profile.");
+        break;
 #endif
         int s = 1; // Reboot in 1 second, hard coded
         LOG_INFO("Reboot in %d seconds", s);

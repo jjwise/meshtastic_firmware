@@ -116,6 +116,14 @@ String irrigation_publish_reason_to_string(IrrigationPublishReason publish_reaso
       return "C";
     case IrrigationPublishReason::MOTION_DETECTED_NO_FIX:
       return "X";
+    case IrrigationPublishReason::PERIODIC_POSITION:
+      return "T";
+    case IrrigationPublishReason::VALVE_STATE:
+      return "V";
+    case IrrigationPublishReason::COMMAND_ACK:
+      return "A";
+    case IrrigationPublishReason::COMMAND_REJECTED:
+      return "R";
     default:
       return "H";
   }
@@ -134,7 +142,51 @@ IrrigationPublishReason irrigation_publish_reason_from_string(const String &valu
   if (value == "X" || value == "MOTION_DETECTED_NO_FIX") {
     return IrrigationPublishReason::MOTION_DETECTED_NO_FIX;
   }
+  if (value == "T" || value == "PERIODIC_POSITION") {
+    return IrrigationPublishReason::PERIODIC_POSITION;
+  }
+  if (value == "V" || value == "VALVE_STATE") {
+    return IrrigationPublishReason::VALVE_STATE;
+  }
+  if (value == "A" || value == "COMMAND_ACK") {
+    return IrrigationPublishReason::COMMAND_ACK;
+  }
+  if (value == "R" || value == "COMMAND_REJECTED") {
+    return IrrigationPublishReason::COMMAND_REJECTED;
+  }
   return IrrigationPublishReason::HEARTBEAT;
+}
+
+String irrigation_node_profile_to_string(IrrigationNodeProfile profile) {
+  switch (profile) {
+    case IrrigationNodeProfile::BASIC_TRACKER:
+      return "BASIC_TRACKER";
+    case IrrigationNodeProfile::VALVE_ACTUATOR:
+      return "VALVE_ACTUATOR";
+    case IrrigationNodeProfile::RELAY_FIXED:
+      return "RELAY_FIXED";
+    case IrrigationNodeProfile::GATEWAY_CENTRAL:
+      return "GATEWAY_CENTRAL";
+    case IrrigationNodeProfile::ENDPOINT_POD:
+    default:
+      return "ENDPOINT_POD";
+  }
+}
+
+IrrigationNodeProfile irrigation_node_profile_from_string(const String &value) {
+  if (value == "BASIC_TRACKER") {
+    return IrrigationNodeProfile::BASIC_TRACKER;
+  }
+  if (value == "VALVE_ACTUATOR") {
+    return IrrigationNodeProfile::VALVE_ACTUATOR;
+  }
+  if (value == "RELAY_FIXED") {
+    return IrrigationNodeProfile::RELAY_FIXED;
+  }
+  if (value == "GATEWAY_CENTRAL") {
+    return IrrigationNodeProfile::GATEWAY_CENTRAL;
+  }
+  return IrrigationNodeProfile::ENDPOINT_POD;
 }
 
 String irrigation_time_quality_to_string(IrrigationTimeQuality time_quality) {
@@ -165,6 +217,7 @@ bool irrigation_event_to_json(const IrrigationTelemetryEvent &event, String &out
   output_json += "\"r\":" + quote(event.tracker_id) + ",";
   output_json += "\"l\":" + quote(event.line_id) + ",";
   output_json += "\"e\":" + quote(event.endpoint_role) + ",";
+  output_json += "\"n\":" + quote(irrigation_node_profile_to_string(event.node_profile)) + ",";
   output_json += "\"p\":" + quote(irrigation_publish_reason_to_string(event.publish_reason)) + ",";
   output_json += "\"a\":" + format_decimal(event.lat, k_lat_lon_precision) + ",";
   output_json += "\"o\":" + format_decimal(event.lon, k_lat_lon_precision) + ",";
@@ -182,6 +235,16 @@ bool irrigation_event_to_json(const IrrigationTelemetryEvent &event, String &out
   output_json += "\"b\":" + String(event.battery_mv) + ",";
   output_json += "\"q\":" + quote(irrigation_time_quality_to_string(event.time_quality)) + ",";
   output_json += "\"h\":" + String(event.hop_count);
+  if (!event.command_id.isEmpty()) {
+    output_json += ",\"c\":" + quote(event.command_id);
+  }
+  if (event.has_valve_state) {
+    output_json += ",\"w\":";
+    output_json += event.valve_open ? "1" : "0";
+  }
+  if (event.has_position_interval) {
+    output_json += ",\"u\":" + String(event.position_interval_sec);
+  }
   output_json += "}";
   return true;
 }
@@ -192,6 +255,7 @@ bool irrigation_event_from_json(const String &payload_json, IrrigationTelemetryE
   static const char *const k_tracker_keys[] = {"r", "tracker_id"};
   static const char *const k_line_keys[] = {"l", "line_id"};
   static const char *const k_endpoint_keys[] = {"e", "endpoint_role"};
+  static const char *const k_profile_keys[] = {"n", "node_profile"};
   static const char *const k_publish_reason_keys[] = {"p", "publish_reason"};
   static const char *const k_lat_keys[] = {"a", "lat"};
   static const char *const k_lon_keys[] = {"o", "long", "lon"};
@@ -203,6 +267,9 @@ bool irrigation_event_from_json(const String &payload_json, IrrigationTelemetryE
   static const char *const k_battery_keys[] = {"b", "battery_mv"};
   static const char *const k_time_quality_keys[] = {"q", "time_quality"};
   static const char *const k_hop_keys[] = {"h", "hop_count"};
+  static const char *const k_command_id_keys[] = {"c", "command_id"};
+  static const char *const k_valve_state_keys[] = {"w", "valve_open"};
+  static const char *const k_position_interval_keys[] = {"u", "position_interval_sec"};
   String token;
   String text_value;
 
@@ -217,6 +284,11 @@ bool irrigation_event_from_json(const String &payload_json, IrrigationTelemetryE
   extract_quoted_string_any(payload_json, k_tracker_keys, 2, event.tracker_id);
   extract_quoted_string_any(payload_json, k_line_keys, 2, event.line_id);
   extract_quoted_string_any(payload_json, k_endpoint_keys, 2, event.endpoint_role);
+  if (extract_quoted_string_any(payload_json, k_profile_keys, 2, text_value)) {
+    event.node_profile = irrigation_node_profile_from_string(text_value);
+  } else {
+    event.node_profile = IrrigationNodeProfile::ENDPOINT_POD;
+  }
   if (extract_quoted_string_any(payload_json, k_publish_reason_keys, 2, text_value)) {
     event.publish_reason = irrigation_publish_reason_from_string(text_value);
   } else {
@@ -288,9 +360,77 @@ bool irrigation_event_from_json(const String &payload_json, IrrigationTelemetryE
     event.hop_count = 0;
   }
 
+  event.command_id = "";
+  extract_quoted_string_any(payload_json, k_command_id_keys, 2, event.command_id);
+  event.has_valve_state = extract_raw_token_any(payload_json, k_valve_state_keys, 2, token);
+  if (event.has_valve_state) {
+    token.toLowerCase();
+    event.valve_open = token == "true" || token == "1";
+  } else {
+    event.valve_open = false;
+  }
+  event.has_position_interval = extract_raw_token_any(payload_json, k_position_interval_keys, 2, token);
+  event.position_interval_sec = event.has_position_interval ? strtoul(token.c_str(), nullptr, 10) : 0;
+
   return true;
+}
+
+bool irrigation_command_from_json(const String &payload_json, IrrigationCommand &command) {
+  static const char *const k_kind_keys[] = {"k", "kind"};
+  static const char *const k_command_id_keys[] = {"i", "command_id"};
+  static const char *const k_tracker_keys[] = {"r", "tracker_id"};
+  static const char *const k_action_keys[] = {"a", "action"};
+  static const char *const k_issued_keys[] = {"x", "issued_at_utc_ms"};
+  static const char *const k_expires_keys[] = {"z", "expires_at_utc_ms"};
+  static const char *const k_valve_open_keys[] = {"w", "valve_open"};
+  static const char *const k_duration_keys[] = {"d", "duration_sec"};
+  static const char *const k_interval_keys[] = {"u", "position_interval_sec"};
+  String token;
+  String value;
+
+  if (!extract_quoted_string_any(payload_json, k_kind_keys, 2, value) ||
+      !(value == "C" || value == "COMMAND")) {
+    return false;
+  }
+  if (!extract_quoted_string_any(payload_json, k_command_id_keys, 2, command.command_id) ||
+      !extract_quoted_string_any(payload_json, k_tracker_keys, 2, command.tracker_id) ||
+      !extract_quoted_string_any(payload_json, k_action_keys, 2, value)) {
+    return false;
+  }
+
+  if (value == "I" || value == "SET_POSITION_INTERVAL") {
+    command.action = IrrigationCommandAction::SET_POSITION_INTERVAL;
+  } else if (value == "V" || value == "SET_VALVE") {
+    command.action = IrrigationCommandAction::SET_VALVE;
+  } else {
+    command.action = IrrigationCommandAction::UNKNOWN;
+    return false;
+  }
+
+  command.issued_at_utc_ms = extract_raw_token_any(payload_json, k_issued_keys, 2, token)
+                                 ? strtoull(token.c_str(), nullptr, 10)
+                                 : 0;
+  command.expires_at_utc_ms = extract_raw_token_any(payload_json, k_expires_keys, 2, token)
+                                  ? strtoull(token.c_str(), nullptr, 10)
+                                  : 0;
+  command.valve_open = false;
+  if (extract_raw_token_any(payload_json, k_valve_open_keys, 2, token)) {
+    token.toLowerCase();
+    command.valve_open = token == "true" || token == "1";
+  }
+  command.duration_sec = extract_raw_token_any(payload_json, k_duration_keys, 2, token)
+                             ? strtoul(token.c_str(), nullptr, 10)
+                             : 0;
+  command.position_interval_sec = extract_raw_token_any(payload_json, k_interval_keys, 2, token)
+                                      ? strtoul(token.c_str(), nullptr, 10)
+                                      : 0;
+  return !command.command_id.isEmpty() && !command.tracker_id.isEmpty();
 }
 
 String build_irrigation_mqtt_topic(const String &farm_id, const String &line_id, const String &tracker_id) {
   return "farm/" + farm_id + "/lines/" + line_id + "/trackers/" + tracker_id + "/telemetry";
+}
+
+String build_irrigation_command_topic(const String &farm_id, const String &tracker_id) {
+  return "farm/" + farm_id + "/nodes/" + tracker_id + "/commands";
 }

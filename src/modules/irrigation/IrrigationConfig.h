@@ -12,6 +12,7 @@ struct IrrigationConfig {
   IrrigationNodeProfile node_profile;
 
   uint32_t heartbeat_interval_sec;
+  uint32_t position_interval_sec;
   uint32_t stationary_interval_sec;
   uint32_t moving_interval_sec;
   uint32_t moving_hold_sec;
@@ -21,6 +22,10 @@ struct IrrigationConfig {
   uint8_t stable_fix_min_samples;
   float stable_fix_max_hdop;
   int32_t imu_interrupt_pin;
+
+  int32_t valve_control_pin;
+  uint32_t valve_max_open_sec;
+  bool valve_active_high;
 
   uint8_t default_hop_limit;
   uint8_t max_hop_override;
@@ -51,6 +56,7 @@ inline IrrigationConfig make_default_irrigation_config() {
   config.endpoint_role = "ENDPOINT_A";
   config.node_profile = IrrigationNodeProfile::ENDPOINT_POD;
   config.heartbeat_interval_sec = 12 * 60 * 60;
+  config.position_interval_sec = 15 * 60;
   config.stationary_interval_sec = 3600;
   config.moving_interval_sec = 10;
   config.moving_hold_sec = 120;
@@ -60,6 +66,9 @@ inline IrrigationConfig make_default_irrigation_config() {
   config.stable_fix_min_samples = 3;
   config.stable_fix_max_hdop = 2.5f;
   config.imu_interrupt_pin = -1;
+  config.valve_control_pin = -1;
+  config.valve_max_open_sec = 60 * 60;
+  config.valve_active_high = true;
   config.default_hop_limit = 3;
   config.max_hop_override = 5;
   config.wifi_ssid = "";

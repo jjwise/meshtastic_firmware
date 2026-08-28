@@ -20,11 +20,14 @@ class IrrigationMqttUplink {
   void tick(uint64_t now_ms);
   bool is_connected();
   bool publish_payload(const String &topic, const String &payload, uint8_t qos_level);
+  bool pop_received_command(String &topic, String &payload);
 
  private:
   bool ensure_native_wifi_started();
   bool ensure_wifi_connected(uint64_t now_ms);
   bool ensure_mqtt_connected(uint64_t now_ms);
+  bool ensure_command_subscription();
+  void poll_command_message();
   bool probe_tcp_socket();
 
   IrrigationConfig config_;
@@ -39,6 +42,10 @@ class IrrigationMqttUplink {
   uint64_t last_mqtt_attempt_ms_;
   bool wifi_reported_connected_;
   bool mqtt_reported_connected_;
+  bool command_subscription_active_;
+  bool command_pending_;
+  String command_topic_;
+  String command_payload_;
   bool native_wifi_started_;
   bool mqtt_uses_tls_;
   int32_t last_wifi_status_;

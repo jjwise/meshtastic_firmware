@@ -8,11 +8,18 @@ namespace {
 constexpr uint64_t k_gateway_flush_interval_ms = 2000;
 constexpr float k_border_hop_hdop_threshold = 3.5f;
 constexpr size_t k_gateway_rx_queue_limit = 16;
+constexpr uint32_t k_min_position_interval_sec = 60;
+constexpr uint32_t k_max_position_interval_sec = 24 * 60 * 60;
+constexpr uint64_t k_min_valid_epoch_ms = 1577836800000ULL;
 
 const char *profile_to_cstr(IrrigationNodeProfile profile) {
   switch (profile) {
     case IrrigationNodeProfile::ENDPOINT_POD:
       return "ENDPOINT_POD";
+    case IrrigationNodeProfile::BASIC_TRACKER:
+      return "BASIC_TRACKER";
+    case IrrigationNodeProfile::VALVE_ACTUATOR:
+      return "VALVE_ACTUATOR";
     case IrrigationNodeProfile::RELAY_FIXED:
       return "RELAY_FIXED";
     case IrrigationNodeProfile::GATEWAY_CENTRAL:
@@ -45,6 +52,14 @@ const char *publish_reason_to_cstr(IrrigationPublishReason publish_reason) {
       return "SETTLE_CONFIRM";
     case IrrigationPublishReason::MOTION_DETECTED_NO_FIX:
       return "MOTION_DETECTED_NO_FIX";
+    case IrrigationPublishReason::PERIODIC_POSITION:
+      return "PERIODIC_POSITION";
+    case IrrigationPublishReason::VALVE_STATE:
+      return "VALVE_STATE";
+    case IrrigationPublishReason::COMMAND_ACK:
+      return "COMMAND_ACK";
+    case IrrigationPublishReason::COMMAND_REJECTED:
+      return "COMMAND_REJECTED";
     default:
       return "UNKNOWN";
   }
@@ -59,6 +74,12 @@ IrrigationModule::IrrigationModule()
       last_good_fix_ms_(0),
       last_heartbeat_publish_ms_(0),
       last_endpoint_publish_ms_(0),
+      last_profile_publish_ms_(0),
+      valve_opened_ms_(0),
+      valve_open_duration_sec_(0),
+      valve_open_(false),
+      last_command_accepted_(false),
+      config_update_pending_(false),
       motion_cycle_start_ms_(0),
       settle_confirm_due_ms_(0),
       sequence_(0),
@@ -71,6 +92,13 @@ bool IrrigationModule::begin(const IrrigationConfig &config) {
   config_ = config;
   if (config_.heartbeat_interval_sec == 0) {
     config_.heartbeat_interval_sec = 12 * 60 * 60;
+  }
+  if (config_.position_interval_sec < k_min_position_interval_sec ||
+      config_.position_interval_sec > k_max_position_interval_sec) {
+    config_.position_interval_sec = 15 * 60;
+  }
+  if (config_.valve_max_open_sec == 0) {
+    config_.valve_max_open_sec = 60 * 60;
   }
   if (config_.moving_hold_sec == 0) {
     config_.moving_hold_sec = 120;
@@ -89,6 +117,14 @@ bool IrrigationModule::begin(const IrrigationConfig &config) {
   last_good_fix_ms_ = 0;
   last_heartbeat_publish_ms_ = 0;
   last_endpoint_publish_ms_ = 0;
+  last_profile_publish_ms_ = 0;
+  valve_opened_ms_ = 0;
+  valve_open_duration_sec_ = 0;
+  valve_open_ = false;
+  last_command_issued_at_utc_ms_ = 0;
+  last_command_id_ = "";
+  last_command_accepted_ = false;
+  config_update_pending_ = false;
   motion_cycle_start_ms_ = 0;
   settle_confirm_due_ms_ = 0;
   sequence_ = 0;
@@ -99,6 +135,15 @@ bool IrrigationModule::begin(const IrrigationConfig &config) {
 
   if (!started_) {
     return false;
+  }
+
+  if (config_.node_profile == IrrigationNodeProfile::VALVE_ACTUATOR) {
+    if (config_.valve_control_pin >= 0) {
+      pinMode(config_.valve_control_pin, OUTPUT);
+      set_valve_output(false);
+    } else {
+      LOG_ERROR("Irrigation valve disabled: valve_control_pin is not configured");
+    }
   }
 
   if (config_.node_profile == IrrigationNodeProfile::GATEWAY_CENTRAL) {
@@ -120,8 +165,19 @@ void IrrigationModule::tick(uint64_t now_ms) {
     return;
   }
 
+  if (config_.node_profile == IrrigationNodeProfile::BASIC_TRACKER) {
+    tick_basic_tracker(now_ms);
+    return;
+  }
+
+  if (config_.node_profile == IrrigationNodeProfile::VALVE_ACTUATOR) {
+    tick_valve_actuator(now_ms);
+    return;
+  }
+
   if (config_.node_profile == IrrigationNodeProfile::GATEWAY_CENTRAL) {
     mqtt_uplink_.tick(now_ms);
+    process_gateway_commands(4);
     process_gateway_ingress(4);
     if (now_ms - last_gateway_flush_ms_ >= k_gateway_flush_interval_ms) {
       last_gateway_flush_ms_ = now_ms;
@@ -147,20 +203,31 @@ void IrrigationModule::on_sensor_sample(const IrrigationSensorSample &sample, ui
 }
 
 bool IrrigationModule::on_packet_rx(const String &payload_json) {
-  if (!started_ || config_.node_profile != IrrigationNodeProfile::GATEWAY_CENTRAL) {
+  if (!started_) {
     return false;
   }
 
-  if (pending_gateway_rx_.size() >= k_gateway_rx_queue_limit) {
-    LOG_WARN("Irrigation gateway rx queue full: queued=%u dropped_bytes=%u",
-             pending_gateway_rx_.size(), payload_json.length());
-    return false;
+  if (config_.node_profile == IrrigationNodeProfile::GATEWAY_CENTRAL) {
+    if (pending_gateway_rx_.size() >= k_gateway_rx_queue_limit) {
+      LOG_WARN("Irrigation gateway rx queue full: queued=%u dropped_bytes=%u",
+               pending_gateway_rx_.size(), payload_json.length());
+      return false;
+    }
+
+    PendingGatewayRx pending_rx;
+    pending_rx.payload_json = payload_json;
+    pending_gateway_rx_.push_back(pending_rx);
+    return true;
   }
 
-  PendingGatewayRx pending_rx;
-  pending_rx.payload_json = payload_json;
-  pending_gateway_rx_.push_back(pending_rx);
-  return true;
+  if (config_.node_profile == IrrigationNodeProfile::BASIC_TRACKER ||
+      config_.node_profile == IrrigationNodeProfile::VALVE_ACTUATOR) {
+    IrrigationCommand command{};
+    if (irrigation_command_from_json(payload_json, command) && command.tracker_id == config_.tracker_id) {
+      return handle_command(command, millis());
+    }
+  }
+  return false;
 }
 
 bool IrrigationModule::pop_next_mesh_tx(String &payload_json, uint8_t &hop_limit) {
@@ -177,6 +244,15 @@ bool IrrigationModule::pop_next_mesh_tx(String &payload_json, uint8_t &hop_limit
 
 bool IrrigationModule::has_pending_mesh_tx() const {
   return !pending_mesh_tx_.empty();
+}
+
+bool IrrigationModule::pop_config_update(IrrigationConfig &config) {
+  if (!config_update_pending_) {
+    return false;
+  }
+  config = config_;
+  config_update_pending_ = false;
+  return true;
 }
 
 void IrrigationModule::maybe_enqueue_endpoint_event(uint64_t now_ms) {
@@ -236,6 +312,169 @@ void IrrigationModule::tick_endpoint(uint64_t now_ms) {
         }
       }
       break;
+  }
+}
+
+void IrrigationModule::tick_basic_tracker(uint64_t now_ms) {
+  const uint64_t interval_ms = static_cast<uint64_t>(config_.position_interval_sec) * 1000ULL;
+  if (last_profile_publish_ms_ != 0 && now_ms - last_profile_publish_ms_ < interval_ms) {
+    return;
+  }
+  if (enqueue_profile_status(IrrigationPublishReason::PERIODIC_POSITION, now_ms)) {
+    last_profile_publish_ms_ = now_ms;
+  }
+}
+
+void IrrigationModule::tick_valve_actuator(uint64_t now_ms) {
+  if (valve_open_ && valve_open_duration_sec_ > 0 &&
+      now_ms - valve_opened_ms_ >= static_cast<uint64_t>(valve_open_duration_sec_) * 1000ULL) {
+    set_valve_output(false);
+    valve_open_duration_sec_ = 0;
+    enqueue_profile_status(IrrigationPublishReason::VALVE_STATE, now_ms);
+    last_profile_publish_ms_ = now_ms;
+    LOG_WARN("Irrigation valve auto-closed: max duration reached");
+  }
+
+  const uint64_t interval_ms = static_cast<uint64_t>(config_.heartbeat_interval_sec) * 1000ULL;
+  if (last_profile_publish_ms_ == 0 || now_ms - last_profile_publish_ms_ >= interval_ms) {
+    if (enqueue_profile_status(IrrigationPublishReason::VALVE_STATE, now_ms)) {
+      last_profile_publish_ms_ = now_ms;
+    }
+  }
+}
+
+bool IrrigationModule::handle_command(const IrrigationCommand &command, uint64_t now_ms) {
+  if (command.command_id == last_command_id_) {
+    enqueue_command_result(command.command_id, last_command_accepted_, now_ms);
+    return last_command_accepted_;
+  }
+
+  const uint64_t device_utc_ms = has_sample_ ? last_sample_.ts_utc_ms : 0;
+  const bool valid_time = device_utc_ms >= k_min_valid_epoch_ms &&
+                          command.issued_at_utc_ms >= k_min_valid_epoch_ms &&
+                          command.expires_at_utc_ms >= command.issued_at_utc_ms &&
+                          device_utc_ms <= command.expires_at_utc_ms &&
+                          device_utc_ms + 60000ULL >= command.issued_at_utc_ms;
+  const bool command_order_valid = last_command_issued_at_utc_ms_ == 0 ||
+                                   command.issued_at_utc_ms >= last_command_issued_at_utc_ms_;
+
+  bool accepted = false;
+  if (command.action == IrrigationCommandAction::SET_POSITION_INTERVAL &&
+      config_.node_profile == IrrigationNodeProfile::BASIC_TRACKER &&
+      valid_time && command_order_valid &&
+      command.position_interval_sec >= k_min_position_interval_sec &&
+      command.position_interval_sec <= k_max_position_interval_sec) {
+    config_.position_interval_sec = command.position_interval_sec;
+    config_update_pending_ = true;
+    last_profile_publish_ms_ = 0;
+    accepted = true;
+  } else if (command.action == IrrigationCommandAction::SET_VALVE &&
+             config_.node_profile == IrrigationNodeProfile::VALVE_ACTUATOR) {
+    if (!command.valve_open) {
+      set_valve_output(false);
+      valve_open_duration_sec_ = 0;
+      accepted = true;
+    } else {
+      const bool valid_duration = command.duration_sec > 0 && command.duration_sec <= config_.valve_max_open_sec;
+      if (config_.valve_control_pin >= 0 && valid_time && command_order_valid && valid_duration) {
+        set_valve_output(true);
+        valve_opened_ms_ = now_ms;
+        valve_open_duration_sec_ = command.duration_sec;
+        accepted = true;
+      }
+    }
+  }
+
+  if (accepted && (last_command_issued_at_utc_ms_ == 0 ||
+                   command.issued_at_utc_ms >= last_command_issued_at_utc_ms_)) {
+    last_command_id_ = command.command_id;
+    if (command.issued_at_utc_ms > last_command_issued_at_utc_ms_) {
+      last_command_issued_at_utc_ms_ = command.issued_at_utc_ms;
+    }
+    last_command_accepted_ = true;
+  }
+  enqueue_command_result(command.command_id, accepted, now_ms);
+  LOG_WARN("Irrigation command handled: command_id=%s profile=%s accepted=%d",
+           command.command_id.c_str(), profile_to_cstr(config_.node_profile), accepted ? 1 : 0);
+  return accepted;
+}
+
+bool IrrigationModule::enqueue_command_result(const String &command_id, bool accepted, uint64_t now_ms) {
+  IrrigationSensorSample sample{};
+  if (has_sample_) {
+    sample = last_sample_;
+  }
+  const bool usable_fix = sample_has_usable_fix(sample);
+  IrrigationTelemetryEvent event = build_event(
+      accepted ? IrrigationPublishReason::COMMAND_ACK : IrrigationPublishReason::COMMAND_REJECTED,
+      sample,
+      !usable_fix,
+      usable_fix,
+      usable_fix && sample.heading_valid,
+      usable_fix ? IrrigationTimeQuality::GNSS : IrrigationTimeQuality::RTC,
+      now_ms);
+  event.command_id = command_id;
+
+  String payload_json;
+  if (!irrigation_event_to_json(event, payload_json)) {
+    return false;
+  }
+  PendingMeshTx tx_item;
+  tx_item.payload_json = payload_json;
+  tx_item.hop_limit = event.hop_count;
+  pending_mesh_tx_.push_back(tx_item);
+  return true;
+}
+
+bool IrrigationModule::enqueue_profile_status(IrrigationPublishReason publish_reason, uint64_t now_ms) {
+  if (has_sample_ && sample_has_usable_fix(last_sample_)) {
+    return enqueue_event_from_sample(
+        publish_reason,
+        last_sample_,
+        false,
+        true,
+        last_sample_.heading_valid,
+        IrrigationTimeQuality::GNSS,
+        now_ms);
+  }
+  return enqueue_event_from_last_good_fix(publish_reason, now_ms);
+}
+
+void IrrigationModule::set_valve_output(bool open) {
+  if (config_.valve_control_pin >= 0) {
+    const bool output_high = open == config_.valve_active_high;
+    digitalWrite(config_.valve_control_pin, output_high ? HIGH : LOW);
+  }
+  valve_open_ = open && config_.valve_control_pin >= 0;
+}
+
+void IrrigationModule::process_gateway_commands(size_t max_messages) {
+  size_t processed_count = 0;
+  String topic;
+  String payload_json;
+  while (processed_count < max_messages && mqtt_uplink_.pop_received_command(topic, payload_json)) {
+    IrrigationCommand command{};
+    const String prefix = "farm/" + config_.farm_id + "/nodes/";
+    const int target_start = prefix.length();
+    const int target_end = topic.lastIndexOf("/commands");
+    const String topic_target = target_end > target_start ? topic.substring(target_start, target_end) : "";
+    if (!irrigation_command_from_json(payload_json, command) || topic_target != command.tracker_id) {
+      LOG_WARN("Irrigation gateway command dropped: invalid contract topic=%s", topic.c_str());
+      processed_count++;
+      continue;
+    }
+    if (pending_mesh_tx_.size() >= k_gateway_rx_queue_limit) {
+      LOG_WARN("Irrigation gateway command dropped: mesh tx queue full command_id=%s", command.command_id.c_str());
+      processed_count++;
+      continue;
+    }
+    PendingMeshTx tx_item;
+    tx_item.payload_json = payload_json;
+    tx_item.hop_limit = config_.max_hop_override;
+    pending_mesh_tx_.push_back(tx_item);
+    LOG_INFO("Irrigation gateway command queued for mesh: command_id=%s target=%s",
+             command.command_id.c_str(), command.tracker_id.c_str());
+    processed_count++;
   }
 }
 
@@ -463,6 +702,7 @@ IrrigationTelemetryEvent IrrigationModule::build_event(
   event.tracker_id = config_.tracker_id;
   event.line_id = config_.line_id;
   event.endpoint_role = config_.endpoint_role;
+  event.node_profile = config_.node_profile;
   event.publish_reason = publish_reason;
   event.lat = sample.lat;
   event.lon = sample.lon;
@@ -477,5 +717,10 @@ IrrigationTelemetryEvent IrrigationModule::build_event(
   event.time_quality =
       sample.time_quality != IrrigationTimeQuality::UNKNOWN ? sample.time_quality : time_quality;
   event.hop_count = compute_hop_limit(sample);
+  event.command_id = "";
+  event.has_valve_state = config_.node_profile == IrrigationNodeProfile::VALVE_ACTUATOR;
+  event.valve_open = valve_open_;
+  event.has_position_interval = config_.node_profile == IrrigationNodeProfile::BASIC_TRACKER;
+  event.position_interval_sec = config_.position_interval_sec;
   return event;
 }
