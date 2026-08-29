@@ -19,7 +19,7 @@ class IrrigationMqttUplink {
   bool begin(const IrrigationConfig &config);
   void tick(uint64_t now_ms);
   bool is_connected();
-  bool publish_payload(const String &topic, const String &payload, uint8_t qos_level);
+  bool publish_payload(const String &topic, const String &payload, uint8_t qos_level, uint64_t now_ms);
   bool pop_received_command(String &topic, String &payload);
 
  private:

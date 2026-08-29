@@ -385,6 +385,7 @@ bool irrigation_command_from_json(const String &payload_json, IrrigationCommand 
   static const char *const k_valve_open_keys[] = {"w", "valve_open"};
   static const char *const k_duration_keys[] = {"d", "duration_sec"};
   static const char *const k_interval_keys[] = {"u", "position_interval_sec"};
+  static const char *const k_signature_keys[] = {"s", "signature"};
   String token;
   String value;
 
@@ -422,8 +423,10 @@ bool irrigation_command_from_json(const String &payload_json, IrrigationCommand 
                              ? strtoul(token.c_str(), nullptr, 10)
                              : 0;
   command.position_interval_sec = extract_raw_token_any(payload_json, k_interval_keys, 2, token)
-                                      ? strtoul(token.c_str(), nullptr, 10)
-                                      : 0;
+                                       ? strtoul(token.c_str(), nullptr, 10)
+                                       : 0;
+  command.signature = "";
+  extract_quoted_string_any(payload_json, k_signature_keys, 2, command.signature);
   return !command.command_id.isEmpty() && !command.tracker_id.isEmpty();
 }
 

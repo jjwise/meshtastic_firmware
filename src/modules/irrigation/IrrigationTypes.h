@@ -75,6 +75,7 @@ struct IrrigationCommand {
   bool valve_open;
   uint32_t duration_sec;
   uint32_t position_interval_sec;
+  String signature;
 };
 
 struct IrrigationSensorSample {

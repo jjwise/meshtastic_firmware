@@ -386,9 +386,9 @@ bool IrrigationMqttUplink::is_connected() {
 #endif
 }
 
-bool IrrigationMqttUplink::publish_payload(const String &topic, const String &payload, uint8_t qos_level) {
+bool IrrigationMqttUplink::publish_payload(
+    const String &topic, const String &payload, uint8_t qos_level, uint64_t now_ms) {
 #if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
-  const uint64_t now_ms = millis();
   if (!ensure_wifi_connected(now_ms) || !ensure_mqtt_connected(now_ms)) {
     LOG_WARN("Irrigation MQTT publish skipped: connectivity unavailable topic=%s", topic.c_str());
     return false;
@@ -416,6 +416,7 @@ bool IrrigationMqttUplink::publish_payload(const String &topic, const String &pa
   (void)topic;
   (void)payload;
   (void)qos_level;
+  (void)now_ms;
   return false;
 #endif
 }

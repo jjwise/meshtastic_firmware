@@ -16,6 +16,9 @@
 #include "gps/RTC.h"
 
 #include <algorithm>
+#if defined(ARCH_ESP32)
+#include <esp_timer.h>
+#endif
 
 IrrigationOverlayModule *irrigationOverlayModule;
 
@@ -205,7 +208,7 @@ void IrrigationOverlayModule::ensureInitialized() {
   if (initialized_) {
     return;
   }
-  if (millis() < k_init_delay_ms) {
+  if (nowMs() < k_init_delay_ms) {
     return;
   }
 
@@ -227,7 +230,7 @@ ProcessMessage IrrigationOverlayModule::handleReceived(const meshtastic_MeshPack
   for (size_t index = 0; index < mp.decoded.payload.size; ++index) {
     payload += static_cast<char>(mp.decoded.payload.bytes[index]);
   }
-  irrigation_.on_packet_rx(payload);
+  irrigation_.on_packet_rx(payload, nowMs());
   return ProcessMessage::CONTINUE;
 }
 
@@ -242,6 +245,7 @@ IrrigationConfig IrrigationOverlayModule::makeRuntimeConfig() const {
 
   apply_build_overrides(cfg);
   cfg.node_profile = resolve_node_profile();
+  cfg.command_hmac_key = irrigation_command_hmac_key();
 
 #ifdef IRRIGATION_TRACKER_ID
   cfg.tracker_id = IRRIGATION_TRACKER_ID;
@@ -295,7 +299,20 @@ IrrigationSensorSample IrrigationOverlayModule::readSensorSampleFromNodeDb() con
   return sample;
 }
 
-uint64_t IrrigationOverlayModule::nowMs() const { return static_cast<uint64_t>(millis()); }
+uint64_t IrrigationOverlayModule::nowMs() const {
+#if defined(ARCH_ESP32)
+  return static_cast<uint64_t>(esp_timer_get_time()) / 1000ULL;
+#else
+  static uint32_t previous_ms = 0;
+  static uint64_t epoch_ms = 0;
+  const uint32_t current_ms = millis();
+  if (current_ms < previous_ms) {
+    epoch_ms += 1ULL << 32;
+  }
+  previous_ms = current_ms;
+  return epoch_ms + current_ms;
+#endif
+}
 
 bool IrrigationOverlayModule::trySendPendingMeshTx() {
   bool sent_any = false;

@@ -1,5 +1,7 @@
 #include "IrrigationModule.h"
 
+#include "IrrigationCommandAuth.h"
+
 #include "DebugConfiguration.h"
 
 #include <cmath>
@@ -178,7 +180,7 @@ void IrrigationModule::tick(uint64_t now_ms) {
   if (config_.node_profile == IrrigationNodeProfile::GATEWAY_CENTRAL) {
     mqtt_uplink_.tick(now_ms);
     process_gateway_commands(4);
-    process_gateway_ingress(4);
+    process_gateway_ingress(now_ms, 4);
     if (now_ms - last_gateway_flush_ms_ >= k_gateway_flush_interval_ms) {
       last_gateway_flush_ms_ = now_ms;
       flush_gateway_backlog(now_ms, 20);
@@ -202,7 +204,7 @@ void IrrigationModule::on_sensor_sample(const IrrigationSensorSample &sample, ui
   motion_detector_.update(sample.accel_rms_g, sample.speed_mps, heading_delta_deg, sample.gps_fix, now_ms);
 }
 
-bool IrrigationModule::on_packet_rx(const String &payload_json) {
+bool IrrigationModule::on_packet_rx(const String &payload_json, uint64_t now_ms) {
   if (!started_) {
     return false;
   }
@@ -224,7 +226,7 @@ bool IrrigationModule::on_packet_rx(const String &payload_json) {
       config_.node_profile == IrrigationNodeProfile::VALVE_ACTUATOR) {
     IrrigationCommand command{};
     if (irrigation_command_from_json(payload_json, command) && command.tracker_id == config_.tracker_id) {
-      return handle_command(command, millis());
+      return handle_command(command, now_ms);
     }
   }
   return false;
@@ -344,6 +346,12 @@ void IrrigationModule::tick_valve_actuator(uint64_t now_ms) {
 }
 
 bool IrrigationModule::handle_command(const IrrigationCommand &command, uint64_t now_ms) {
+  if (!irrigation_command_signature_is_valid(command, config_.command_hmac_key)) {
+    LOG_WARN("Irrigation command authentication failed: command_id=%s", command.command_id.c_str());
+    enqueue_command_result(command.command_id, false, now_ms);
+    return false;
+  }
+
   if (command.command_id == last_command_id_) {
     enqueue_command_result(command.command_id, last_command_accepted_, now_ms);
     return last_command_accepted_;
@@ -608,7 +616,7 @@ void IrrigationModule::remember_last_good_fix(const IrrigationSensorSample &samp
   last_good_fix_ms_ = now_ms;
 }
 
-void IrrigationModule::process_gateway_ingress(size_t max_messages) {
+void IrrigationModule::process_gateway_ingress(uint64_t now_ms, size_t max_messages) {
   size_t processed_count = 0;
   while (processed_count < max_messages && !pending_gateway_rx_.empty()) {
     const PendingGatewayRx next_item = pending_gateway_rx_.front();
@@ -630,7 +638,7 @@ void IrrigationModule::process_gateway_ingress(size_t max_messages) {
     } else {
       const String topic = build_irrigation_mqtt_topic(config_.farm_id, event.line_id, event.tracker_id);
       LOG_WARN("Irrigation gateway queue append failed: msg_id=%s topic=%s", event.msg_id.c_str(), topic.c_str());
-      if (mqtt_uplink_.publish_payload(topic, next_item.payload_json, 1)) {
+      if (mqtt_uplink_.publish_payload(topic, next_item.payload_json, 1, now_ms)) {
         LOG_WARN("Irrigation gateway fallback publish succeeded: msg_id=%s topic=%s",
                  event.msg_id.c_str(), topic.c_str());
       } else {
@@ -644,7 +652,6 @@ void IrrigationModule::process_gateway_ingress(size_t max_messages) {
 }
 
 void IrrigationModule::flush_gateway_backlog(uint64_t now_ms, size_t max_messages) {
-  (void)now_ms;
   if (!mqtt_uplink_.is_connected()) {
     return;
   }
@@ -664,7 +671,7 @@ void IrrigationModule::flush_gateway_backlog(uint64_t now_ms, size_t max_message
     }
 
     const String topic = build_irrigation_mqtt_topic(config_.farm_id, event.line_id, event.tracker_id);
-    if (!mqtt_uplink_.publish_payload(topic, payload_json, 1)) {
+    if (!mqtt_uplink_.publish_payload(topic, payload_json, 1, now_ms)) {
       LOG_WARN("Irrigation gateway publish blocked: msg_id=%s topic=%s", event.msg_id.c_str(), topic.c_str());
       break;
     }

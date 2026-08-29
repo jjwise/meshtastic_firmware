@@ -37,6 +37,7 @@ struct IrrigationConfig {
   String mqtt_username;
   String mqtt_password;
   String mqtt_client_id;
+  String command_hmac_key;
 
   uint16_t gateway_buffer_max_records;
   bool enabled;
@@ -78,6 +79,7 @@ inline IrrigationConfig make_default_irrigation_config() {
   config.mqtt_username = "";
   config.mqtt_password = "";
   config.mqtt_client_id = "tracker_demo_gateway";
+  config.command_hmac_key = "";
   config.gateway_buffer_max_records = 12000;
   config.enabled = true;
   return config;

@@ -28,7 +28,7 @@ class IrrigationModule {
   void tick(uint64_t now_ms);
 
   void on_sensor_sample(const IrrigationSensorSample &sample, uint64_t now_ms);
-  bool on_packet_rx(const String &payload_json);
+  bool on_packet_rx(const String &payload_json, uint64_t now_ms);
 
   bool pop_next_mesh_tx(String &payload_json, uint8_t &hop_limit);
   bool has_pending_mesh_tx() const;
@@ -74,7 +74,7 @@ class IrrigationModule {
   bool sample_has_stable_fix(const IrrigationSensorSample &sample) const;
   bool sample_has_usable_fix(const IrrigationSensorSample &sample) const;
   void remember_last_good_fix(const IrrigationSensorSample &sample, uint64_t now_ms);
-  void process_gateway_ingress(size_t max_messages);
+  void process_gateway_ingress(uint64_t now_ms, size_t max_messages);
   void flush_gateway_backlog(uint64_t now_ms, size_t max_messages);
   uint8_t compute_hop_limit(const IrrigationSensorSample &sample) const;
   IrrigationTelemetryEvent build_event(
