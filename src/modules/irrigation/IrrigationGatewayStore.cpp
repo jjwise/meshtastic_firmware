@@ -2,6 +2,8 @@
 
 #include "DebugConfiguration.h"
 
+#include <utility>
+
 #ifdef ARCH_ESP32
 #include <LittleFS.h>
 #endif
@@ -47,93 +49,119 @@ bool IrrigationGatewayStore::begin(const String &file_path, size_t max_records) 
 }
 
 bool IrrigationGatewayStore::append(const String &payload) {
-  std::vector<String> lines;
-  if (!load_lines(lines)) {
-    return false;
-  }
-  lines.push_back(payload);
-  while (lines.size() > max_records_) {
-    lines.erase(lines.begin());
-  }
-  return save_lines(lines);
+  return rewrite(&payload);
 }
 
 bool IrrigationGatewayStore::peek_next(String &payload) {
-  std::vector<String> lines;
-  if (!load_lines(lines) || lines.empty()) {
-    return false;
-  }
-  payload = lines.front();
-  return true;
-}
-
-bool IrrigationGatewayStore::pop_next() {
-  std::vector<String> lines;
-  if (!load_lines(lines) || lines.empty()) {
-    return false;
-  }
-  lines.erase(lines.begin());
-  return save_lines(lines);
-}
-
-size_t IrrigationGatewayStore::size() const {
-  std::vector<String> lines;
-  if (!load_lines(lines)) {
-    return 0;
-  }
-  return lines.size();
-}
-
-bool IrrigationGatewayStore::load_lines(std::vector<String> &lines) const {
-  lines.clear();
 #ifdef ARCH_ESP32
   if (!ensure_filesystem_ready()) {
-    LOG_WARN("Irrigation gateway store read failed: filesystem unavailable path=%s", file_path_.c_str());
     return false;
   }
   File queue_file = LittleFS.open(file_path_, FILE_READ);
   if (!queue_file) {
-    LOG_WARN("Irrigation gateway store read failed: open path=%s", file_path_.c_str());
     return false;
   }
-
   while (queue_file.available()) {
     String line = queue_file.readStringUntil('\n');
     line.trim();
     if (!line.isEmpty()) {
-      lines.push_back(line);
+      payload = std::move(line);
+      return true;
     }
   }
-  queue_file.close();
+#else
+  (void)payload;
+#endif
+  return false;
+}
+
+bool IrrigationGatewayStore::pop_next() {
+  return rewrite(nullptr);
+}
+
+size_t IrrigationGatewayStore::size() const {
+  size_t count = 0;
+  return count_records(count) ? count : 0;
+}
+
+bool IrrigationGatewayStore::count_records(size_t &count) const {
+  count = 0;
+#ifdef ARCH_ESP32
+  if (!ensure_filesystem_ready()) {
+    return false;
+  }
+  File queue_file = LittleFS.open(file_path_, FILE_READ);
+  if (!queue_file) {
+    return false;
+  }
+  while (queue_file.available()) {
+    String line = queue_file.readStringUntil('\n');
+    line.trim();
+    if (!line.isEmpty()) {
+      ++count;
+    }
+  }
   return true;
 #else
   return false;
 #endif
 }
 
-bool IrrigationGatewayStore::save_lines(const std::vector<String> &lines) {
+bool IrrigationGatewayStore::rewrite(const String *appended_payload) {
 #ifdef ARCH_ESP32
-  if (!ensure_filesystem_ready()) {
-    LOG_WARN("Irrigation gateway store write failed: filesystem unavailable path=%s", file_path_.c_str());
+  size_t count = 0;
+  if (!count_records(count) || (appended_payload == nullptr && count == 0)) {
     return false;
   }
-  if (LittleFS.exists(file_path_) && !LittleFS.remove(file_path_)) {
-    LOG_WARN("Irrigation gateway store write failed: remove path=%s", file_path_.c_str());
+
+  const String temp_path = file_path_ + ".tmp";
+  File input = LittleFS.open(file_path_, FILE_READ);
+  if (!input) {
     return false;
   }
-  File queue_file = LittleFS.open(file_path_, FILE_WRITE);
-  if (!queue_file) {
-    LOG_WARN("Irrigation gateway store write failed: open path=%s", file_path_.c_str());
+  File output = LittleFS.open(temp_path, FILE_WRITE);
+  if (!output) {
     return false;
+  }
+
+  size_t skip = 1;
+  if (appended_payload != nullptr) {
+    const size_t keep = max_records_ > 0 ? max_records_ - 1 : 0;
+    skip = count > keep ? count - keep : 0;
   }
   bool success = true;
-  for (const String &line : lines) {
-    success = success && queue_file.println(line);
+  // Keep at most one existing record in RAM, regardless of the backlog size.
+  while (input.available()) {
+    String line = input.readStringUntil('\n');
+    line.trim();
+    if (line.isEmpty()) {
+      continue;
+    }
+    if (skip > 0) {
+      --skip;
+      continue;
+    }
+    if (output.println(line) != line.length() + 2) {
+      success = false;
+      break;
+    }
   }
-  queue_file.close();
-  return success;
+  if (success && appended_payload != nullptr && max_records_ > 0) {
+    success = output.println(*appended_payload) == appended_payload->length() + 2;
+  }
+  output.flush();
+  output.close();
+  input.close();
+
+  // Replace only a fully written file; LittleFS rename replaces the old target.
+  if (success && LittleFS.rename(temp_path, file_path_)) {
+    return true;
+  }
+  LittleFS.remove(temp_path);
+  LOG_WARN("Irrigation gateway store write failed");
+  return false;
 #else
-  (void)lines;
+  (void)appended_payload;
   return false;
 #endif
 }

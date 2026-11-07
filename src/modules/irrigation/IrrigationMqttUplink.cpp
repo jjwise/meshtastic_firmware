@@ -3,6 +3,8 @@
 
 #include "DebugConfiguration.h"
 #include "NodeDB.h"
+#include "gps/RTC.h"
+#include "mesh/Throttle.h"
 #include "modules/AdminModule.h"
 #include "mesh/wifi/WiFiAPClient.h"
 #include "sleep.h"
@@ -13,17 +15,43 @@
 #if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
 #include <esp_heap_caps.h>
 #include <esp_wifi.h>
-#ifdef IRRIGATION_MQTT_TLS_INSECURE_DIAGNOSTIC
 #include <cerrno>
+#include <ctime>
 #include <lwip/sockets.h>
-#endif
 #endif
 
 namespace {
 constexpr uint64_t k_wifi_retry_ms = 10000;
-constexpr uint64_t k_mqtt_retry_ms = 5000;
+constexpr uint32_t k_mqtt_retry_ms = 5000;
 
 #if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
+void log_tls_clock() {
+  const time_t epoch = time(nullptr);
+  struct tm utc = {};
+  char utc_text[21] = "unavailable";
+  if (gmtime_r(&epoch, &utc) != nullptr) {
+    strftime(utc_text, sizeof(utc_text), "%Y-%m-%dT%H:%M:%SZ", &utc);
+  }
+  // Match RTC.cpp's 32-bit epoch formatting for the embedded printf implementation.
+  LOG_INFO("Irrigation TLS clock: epoch=%lu utc=%s rtc=%s",
+           static_cast<unsigned long>(epoch), utc_text, RtcName(getRTCQuality()));
+}
+
+void log_tls_verification(uint32_t flags, int handshake_state) {
+  if (flags == UINT32_MAX) {
+    LOG_WARN("Irrigation TLS verify: unavailable (no verification result)");
+    return;
+  }
+  if (flags == 0 && handshake_state < MBEDTLS_SSL_SERVER_CERTIFICATE) {
+    LOG_WARN("Irrigation TLS verify: not_reached (server certificate not processed)");
+    return;
+  }
+  LOG_WARN("Irrigation TLS verify: flags=0x%08x expired=%d not_yet_valid=%d name_mismatch=%d untrusted=%d",
+           static_cast<unsigned int>(flags), (flags & MBEDTLS_X509_BADCERT_EXPIRED) != 0,
+           (flags & MBEDTLS_X509_BADCERT_FUTURE) != 0, (flags & MBEDTLS_X509_BADCERT_CN_MISMATCH) != 0,
+           (flags & MBEDTLS_X509_BADCERT_NOT_TRUSTED) != 0);
+}
+
 void log_tls_heap(const char *stage) {
   constexpr uint32_t k_internal_8bit_caps = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
   constexpr uint32_t k_dma_caps = MALLOC_CAP_DMA;
@@ -37,7 +65,6 @@ void log_tls_heap(const char *stage) {
            static_cast<unsigned int>(heap_caps_get_minimum_free_size(k_dma_caps)));
 }
 
-#ifdef IRRIGATION_MQTT_TLS_INSECURE_DIAGNOSTIC
 const char *tls_handshake_state_name(int state) {
   switch (state) {
     case MBEDTLS_SSL_HELLO_REQUEST:
@@ -79,45 +106,7 @@ const char *tls_handshake_state_name(int state) {
   }
 }
 
-class IrrigationTlsDiagnosticClient final : public WiFiClientSecure {
- public:
-  int connect(const char *host, uint16_t port) override {
-    IPAddress address;
-    if (WiFi.hostByName(host, address) != 1) {
-      _lastError = -1;
-      LOG_WARN("Irrigation TLS state probe DNS failed: host=%s", host);
-      return 0;
-    }
-
-    errno = 0;
-    const int result = start_ssl_client(sslclient, address, port, host, _timeout, _CA_cert, _use_ca_bundle,
-                                        _cert, _private_key, nullptr, nullptr, _use_insecure, _alpn_protos);
-    const int saved_errno = errno;
-    _lastError = result;
-
-    const int socket_fd = sslclient->socket;
-    const int state = sslclient->ssl_ctx.state;
-    const size_t input_left = sslclient->ssl_ctx.in_left;
-    const size_t output_left = sslclient->ssl_ctx.out_left;
-    int socket_error = 0;
-    socklen_t socket_error_size = sizeof(socket_error);
-    const int socket_option_result =
-        socket_fd >= 0 ? getsockopt(socket_fd, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_size) : -1;
-
-    LOG_WARN("Irrigation TLS state probe: result=%d state=%d(%s) in_left=%u out_left=%u socket=%d errno=%d "
-             "so_error=%d so_result=%d",
-             result, state, tls_handshake_state_name(state), static_cast<unsigned int>(input_left),
-             static_cast<unsigned int>(output_left), socket_fd, saved_errno, socket_error, socket_option_result);
-
-    if (result < 0) {
-      stop();
-      return 0;
-    }
-    _connected = true;
-    return 1;
-  }
-};
-
+#ifdef IRRIGATION_MQTT_TLS_INSECURE_DIAGNOSTIC
 bool run_tcp_write_probe(const String &host, uint16_t port) {
   static constexpr char k_probe_marker[] = "IRRIGATION_TCP_PROBE";
   WiFiClient probe_client;
@@ -230,6 +219,51 @@ String normalize_mqtt_host(const String &raw_host) {
 }  // namespace
 
 #if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
+int IrrigationTlsClient::connect(const char *host, uint16_t port) {
+  _connected = false;
+  IPAddress address;
+  if (WiFi.hostByName(host, address) != 1) {
+    _lastError = -1;
+    LOG_WARN("Irrigation TLS connect failed: stage=dns");
+    return 0;
+  }
+
+  log_tls_clock();
+  const uint32_t started_ms = millis();
+  errno = 0;
+  // Capture TLS state before WiFiClientSecure::stop() erases the failure context.
+  const int result = start_ssl_client(sslclient, address, port, host, _timeout, _CA_cert, _use_ca_bundle,
+                                      _cert, _private_key, _pskIdent, _psKey, _use_insecure, _alpn_protos);
+  const int saved_errno = errno;
+  _lastError = result;
+  if (result < 0) {
+    const int socket_fd = sslclient->socket;
+    const int state = sslclient->ssl_ctx.state;
+    const char *stage = socket_fd < 0 ? "tcp_connect" :
+                        (sslclient->ssl_ctx.conf == nullptr ? "socket_or_tls_setup" : "tls_handshake");
+    int socket_error = 0;
+    socklen_t socket_error_size = sizeof(socket_error);
+    const int socket_option_result =
+        socket_fd >= 0 ? getsockopt(socket_fd, SOL_SOCKET, SO_ERROR, &socket_error, &socket_error_size) : -1;
+    // The serial logger has a 160-byte buffer; keep each diagnostic line short.
+    LOG_WARN("Irrigation TLS connect failed: stage=%s result=%d elapsed_ms=%u state=%d(%s)",
+             stage, result, static_cast<unsigned int>(millis() - started_ms), state,
+             tls_handshake_state_name(state));
+    LOG_WARN("Irrigation TLS socket: errno=%d so_error=%d so_result=%d in_left=%u out_left=%u",
+             saved_errno, socket_error, socket_option_result,
+             static_cast<unsigned int>(sslclient->ssl_ctx.in_left),
+             static_cast<unsigned int>(sslclient->ssl_ctx.out_left));
+    log_tls_verification(mbedtls_ssl_get_verify_result(&sslclient->ssl_ctx), state);
+    log_tls_heap("at_failure_before_cleanup");
+    stop();
+    _connected = false;
+    return 0;
+  }
+  _connected = true;
+  LOG_INFO("Irrigation TLS connected: elapsed_ms=%u", static_cast<unsigned int>(millis() - started_ms));
+  return 1;
+}
+
 void applyIrrigationGatewayWiFiBootstrap() {
 #ifdef IRRIGATION_WIFI_SSID
   if (IRRIGATION_WIFI_SSID[0] == '\0') {
@@ -257,7 +291,7 @@ IrrigationMqttUplink::IrrigationMqttUplink()
       secure_mqtt_client_(secure_client_),
       mqtt_client_(nullptr),
       last_wifi_attempt_ms_(0),
-      last_mqtt_attempt_ms_(0),
+      last_mqtt_attempt_end_ms_(0),
       wifi_reported_connected_(false),
       mqtt_reported_connected_(false),
       command_subscription_active_(false),
@@ -267,7 +301,7 @@ IrrigationMqttUplink::IrrigationMqttUplink()
       last_wifi_status_(WL_IDLE_STATUS) {}
 #else
     : last_wifi_attempt_ms_(0),
-      last_mqtt_attempt_ms_(0),
+      last_mqtt_attempt_end_ms_(0),
       wifi_reported_connected_(false),
       mqtt_reported_connected_(false),
       command_subscription_active_(false),
@@ -300,6 +334,7 @@ bool IrrigationMqttUplink::begin(const IrrigationConfig &config) {
     }
     secure_client_.setCACert(ca_certificate);
 #endif
+    secure_client_.setTimeout(10);  // WiFiClientSecure takes seconds, including for TCP connect.
     secure_client_.setHandshakeTimeout(45);
     mqtt_client_ = &secure_mqtt_client_;
   } else {
@@ -310,7 +345,6 @@ bool IrrigationMqttUplink::begin(const IrrigationConfig &config) {
   mqtt_client_->setCleanSession(false);
   mqtt_client_->setKeepAliveInterval(60 * 1000UL);
   mqtt_client_->setConnectionTimeout(15 * 1000UL);
-  mqtt_client_->setTxPayloadSize(512);
   command_subscription_active_ = false;
   command_pending_ = false;
   LOG_INFO("Irrigation MQTT transport: tls=%d port=%u", mqtt_uses_tls_ ? 1 : 0, config_.mqtt_port);
@@ -368,7 +402,7 @@ void IrrigationMqttUplink::tick(uint64_t now_ms) {
   if (!ensure_wifi_connected(now_ms)) {
     return;
   }
-  ensure_mqtt_connected(now_ms);
+  ensure_mqtt_connected();
   if (mqtt_client_ != nullptr && mqtt_client_->connected()) {
     ensure_command_subscription();
     poll_command_message();
@@ -389,7 +423,9 @@ bool IrrigationMqttUplink::is_connected() {
 bool IrrigationMqttUplink::publish_payload(
     const String &topic, const String &payload, uint8_t qos_level, uint64_t now_ms) {
 #if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
-  if (!ensure_wifi_connected(now_ms) || !ensure_mqtt_connected(now_ms)) {
+  // Reconnect only from tick(), before queued payloads and decoded events are loaded.
+  (void)now_ms;
+  if (WiFi.status() != WL_CONNECTED || !is_connected()) {
     LOG_WARN("Irrigation MQTT publish skipped: connectivity unavailable topic=%s", topic.c_str());
     return false;
   }
@@ -397,14 +433,21 @@ bool IrrigationMqttUplink::publish_payload(
     LOG_WARN("Irrigation MQTT invalid QoS/client: qos=%u", qos_level);
     return false;
   }
-  if (!mqtt_client_->beginMessage(topic.c_str(), false, qos_level, false)) {
+  if (!mqtt_client_->beginMessage(topic.c_str(), static_cast<unsigned long>(payload.length()), false, qos_level, false)) {
     LOG_WARN("Irrigation MQTT begin publish failed: topic=%s qos=%u", topic.c_str(), qos_level);
     return false;
   }
   const size_t written =
       mqtt_client_->write(reinterpret_cast<const uint8_t *>(payload.c_str()), payload.length());
+  if (written != payload.length()) {
+    // A partial streamed MQTT frame cannot be reused by the next publish.
+    mqtt_client_->stop();
+    LOG_WARN("Irrigation MQTT write incomplete: written=%u expected=%u",
+             static_cast<unsigned int>(written), static_cast<unsigned int>(payload.length()));
+    return false;
+  }
   const int publish_result = mqtt_client_->endMessage();
-  const bool published = written == payload.length() && publish_result == 1;
+  const bool published = publish_result == 1;
   if (published) {
     LOG_DEBUG("Irrigation MQTT published: topic=%s bytes=%u qos=%u", topic.c_str(), payload.length(), qos_level);
   } else {
@@ -473,23 +516,37 @@ void IrrigationMqttUplink::poll_command_message() {
   }
   const String topic = mqtt_client_->messageTopic();
   const int retained = mqtt_client_->messageRetain();
-  String payload;
-  payload.reserve(static_cast<unsigned int>(message_size));
-  while (mqtt_client_->available()) {
-    payload += static_cast<char>(mqtt_client_->read());
-  }
-
   const String prefix = "farm/" + config_.farm_id + "/nodes/";
   const bool valid_topic = topic.startsWith(prefix) && topic.endsWith("/commands");
-  if (!valid_topic || retained == 1 || payload.length() > 512) {
+  if (!valid_topic || retained == 1 || message_size > 512) {
+    // Drain rejected commands without allocating a buffer of untrusted size.
+    while (mqtt_client_->available()) {
+      if (mqtt_client_->read() < 0) {
+        mqtt_client_->stop();
+        return;
+      }
+    }
     LOG_WARN("Irrigation MQTT command dropped: topic=%s retained=%d bytes=%u",
-             topic.c_str(), retained, payload.length());
+             topic.c_str(), retained, static_cast<unsigned int>(message_size));
     return;
   }
+  command_payload_ = "";
+  if (!command_payload_.reserve(static_cast<unsigned int>(message_size))) {
+    mqtt_client_->stop();
+    return;
+  }
+  while (mqtt_client_->available()) {
+    const int byte = mqtt_client_->read();
+    if (byte < 0) {
+      command_payload_ = "";
+      mqtt_client_->stop();
+      return;
+    }
+    command_payload_ += static_cast<char>(byte);
+  }
   command_topic_ = topic;
-  command_payload_ = payload;
   command_pending_ = true;
-  LOG_INFO("Irrigation MQTT command received: topic=%s bytes=%u", topic.c_str(), payload.length());
+  LOG_INFO("Irrigation MQTT command received: topic=%s bytes=%u", topic.c_str(), command_payload_.length());
 #endif
 }
 
@@ -555,7 +612,7 @@ bool IrrigationMqttUplink::ensure_wifi_connected(uint64_t now_ms) {
 #endif
 }
 
-bool IrrigationMqttUplink::ensure_mqtt_connected(uint64_t now_ms) {
+bool IrrigationMqttUplink::ensure_mqtt_connected() {
 #if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
   if (mqtt_client_ != nullptr && mqtt_client_->connected()) {
     if (!mqtt_reported_connected_) {
@@ -571,10 +628,9 @@ bool IrrigationMqttUplink::ensure_mqtt_connected(uint64_t now_ms) {
     LOG_WARN("Irrigation MQTT disconnected: connect_error=%d",
              mqtt_client_ != nullptr ? mqtt_client_->connectError() : -1);
   }
-  if (now_ms - last_mqtt_attempt_ms_ < k_mqtt_retry_ms) {
+  if (mqtt_client_ == nullptr || Throttle::isWithinTimespanMs(last_mqtt_attempt_end_ms_, k_mqtt_retry_ms)) {
     return false;
   }
-  last_mqtt_attempt_ms_ = now_ms;
   LOG_INFO("Irrigation MQTT connect attempt: host=%s port=%u client_id=%s",
            config_.mqtt_host.c_str(), config_.mqtt_port, config_.mqtt_client_id.c_str());
   IPAddress resolved_ip;
@@ -584,6 +640,8 @@ bool IrrigationMqttUplink::ensure_mqtt_connected(uint64_t now_ms) {
              config_.mqtt_host.c_str(), resolved_ip.toString().c_str());
   } else {
     LOG_WARN("Irrigation MQTT DNS resolution failed: host=%s", config_.mqtt_host.c_str());
+    last_mqtt_attempt_end_ms_ = millis();
+    return false;
   }
 #ifdef IRRIGATION_MQTT_TLS_INSECURE_DIAGNOSTIC
   static uint8_t diagnostic_phase = 0;
@@ -595,21 +653,25 @@ bool IrrigationMqttUplink::ensure_mqtt_connected(uint64_t now_ms) {
     log_tls_heap("after_raw_tcp_probe");
     LOG_WARN("Irrigation raw-first diagnostic completed: raw_tcp_write=%d tls_not_started=1",
              tcp_write_succeeded ? 1 : 0);
+    last_mqtt_attempt_end_ms_ = millis();
     return false;
   }
   if (diagnostic_phase == 1) {
     diagnostic_phase = 2;
     setCPUFast(true);
     log_tls_heap("before_state_probe");
-    IrrigationTlsDiagnosticClient diagnostic_client;
+    IrrigationTlsClient diagnostic_client;
     diagnostic_client.setInsecure();
+    diagnostic_client.setTimeout(10);
     diagnostic_client.setHandshakeTimeout(45);
     const int tls_result = diagnostic_client.connect(config_.mqtt_host.c_str(), config_.mqtt_port);
     log_tls_heap("after_state_probe");
     LOG_WARN("Irrigation TLS state probe completed: connected=%d", tls_result == 1 ? 1 : 0);
     diagnostic_client.stop();
+    last_mqtt_attempt_end_ms_ = millis();
     return false;
   }
+  last_mqtt_attempt_end_ms_ = millis();
   return false;
 #endif
   // Do not open a diagnostic socket immediately before TLS. Its short-lived
@@ -620,9 +682,6 @@ bool IrrigationMqttUplink::ensure_mqtt_connected(uint64_t now_ms) {
     log_tls_heap("before_connect");
   } else {
     plain_client_.stop();
-  }
-  if (mqtt_client_ == nullptr) {
-    return false;
   }
   const bool connected = mqtt_client_->connect(config_.mqtt_host.c_str(), config_.mqtt_port) == 1;
   if (connected) {
@@ -641,9 +700,10 @@ bool IrrigationMqttUplink::ensure_mqtt_connected(uint64_t now_ms) {
                mqtt_client_->connectError());
     }
   }
+  // A blocking connect must finish before the retry cooldown starts.
+  last_mqtt_attempt_end_ms_ = millis();
   return connected;
 #else
-  (void)now_ms;
   return false;
 #endif
 }

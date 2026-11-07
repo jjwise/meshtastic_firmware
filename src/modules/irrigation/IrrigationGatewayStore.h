@@ -2,8 +2,6 @@
 
 #include <Arduino.h>
 
-#include <vector>
-
 class IrrigationGatewayStore {
  public:
   IrrigationGatewayStore();
@@ -15,8 +13,8 @@ class IrrigationGatewayStore {
   size_t size() const;
 
  private:
-  bool load_lines(std::vector<String> &lines) const;
-  bool save_lines(const std::vector<String> &lines);
+  bool rewrite(const String *appended_payload);
+  bool count_records(size_t &count) const;
 
   String file_path_;
   size_t max_records_;

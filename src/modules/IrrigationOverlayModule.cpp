@@ -20,11 +20,60 @@
 #include <esp_timer.h>
 #endif
 
+#if defined(IRRIGATION_IMU_TEST) && defined(ARCH_ESP32)
+#include "mesh/Throttle.h"
+
+#include <ICM_20948.h>
+#include <driver/gpio.h>
+#include <driver/rtc_io.h>
+#include <esp_sleep.h>
+#endif
+
 IrrigationOverlayModule *irrigationOverlayModule;
 
 namespace {
 constexpr uint32_t k_run_interval_ms = 1000;
 constexpr uint32_t k_init_delay_ms = 15000;
+
+#if defined(IRRIGATION_IMU_TEST) && defined(ARCH_ESP32)
+#ifndef IRRIGATION_IMU_INTERRUPT_PIN
+#error "IRRIGATION_IMU_TEST requires IRRIGATION_IMU_INTERRUPT_PIN"
+#endif
+
+static_assert(IRRIGATION_IMU_INTERRUPT_PIN >= 0 && IRRIGATION_IMU_INTERRUPT_PIN <= 21,
+              "IRRIGATION_IMU_INTERRUPT_PIN must be an ESP32-S3 RTC-capable GPIO (0..21)");
+
+#ifndef IRRIGATION_IMU_TEST_WOM_THRESHOLD
+#define IRRIGATION_IMU_TEST_WOM_THRESHOLD 25
+#endif
+
+#ifndef IRRIGATION_IMU_TEST_SLEEP_DELAY_MS
+#define IRRIGATION_IMU_TEST_SLEEP_DELAY_MS 5000
+#endif
+
+constexpr uint32_t k_imu_test_run_interval_ms = 100;
+constexpr uint32_t k_imu_test_init_delay_ms = 3000;
+constexpr uint32_t k_imu_test_init_retry_ms = 5000;
+constexpr gpio_num_t k_imu_test_gpio = static_cast<gpio_num_t>(IRRIGATION_IMU_INTERRUPT_PIN);
+
+ICM_20948_I2C imu_test_sensor;
+volatile bool imu_test_interrupt_pending = false;
+RTC_DATA_ATTR uint32_t imu_test_deep_sleep_wake_count = 0;
+
+void IRAM_ATTR irrigation_imu_test_isr() {
+  imu_test_interrupt_pending = true;
+}
+
+bool imu_test_status_ok(ICM_20948_Status_e status, const char *operation) {
+  if (status == ICM_20948_Stat_Ok) {
+    return true;
+  }
+
+  LOG_WARN("[IrrigationOverlay] IMU test: %s failed: status=%d detail=%s", operation, static_cast<int>(status),
+           imu_test_sensor.statusString(status));
+  return false;
+}
+#endif
 
 String node_num_hex(NodeNum node_num) {
   String value = String(node_num, HEX);
@@ -180,11 +229,24 @@ IrrigationNodeProfile resolve_node_profile() {
 IrrigationOverlayModule::IrrigationOverlayModule()
     : SinglePortModule("irrigationOverlay", meshtastic_PortNum_PRIVATE_APP),
       concurrency::OSThread("IrrigationOverlay"),
+#if defined(IRRIGATION_IMU_TEST) && defined(ARCH_ESP32)
+      imuTestState_(ImuTestState::WAIT_FOR_INITIALIZATION),
+      imuTestStateStartedMs_(0),
+      imuTestLastInitAttemptMs_(0),
+#endif
       initialized_(false) {
+#if defined(IRRIGATION_IMU_TEST) && defined(ARCH_ESP32)
+  setInterval(k_imu_test_run_interval_ms);
+#else
   setInterval(k_run_interval_ms);
+#endif
 }
 
 int32_t IrrigationOverlayModule::runOnce() {
+#if defined(IRRIGATION_IMU_TEST) && defined(ARCH_ESP32)
+  runImuTest();
+  return k_imu_test_run_interval_ms;
+#else
   ensureInitialized();
   if (!initialized_) {
     return k_run_interval_ms;
@@ -202,7 +264,192 @@ int32_t IrrigationOverlayModule::runOnce() {
     LOG_INFO("Irrigation runtime config persistence: saved=%d", saved ? 1 : 0);
   }
   return k_run_interval_ms;
+#endif
 }
+
+#if defined(IRRIGATION_IMU_TEST) && defined(ARCH_ESP32)
+void IrrigationOverlayModule::runImuTest() {
+  const uint32_t now_ms = millis();
+
+  if (imuTestState_ == ImuTestState::WAIT_FOR_INITIALIZATION) {
+    const esp_sleep_wakeup_cause_t wake_cause = esp_sleep_get_wakeup_cause();
+    if (wake_cause == ESP_SLEEP_WAKEUP_EXT1) {
+      const uint64_t wake_mask = esp_sleep_get_ext1_wakeup_status();
+      ++imu_test_deep_sleep_wake_count;
+      rtc_gpio_deinit(k_imu_test_gpio);
+      pinMode(IRRIGATION_IMU_INTERRUPT_PIN, INPUT_PULLUP);
+
+      if ((wake_mask & (1ULL << IRRIGATION_IMU_INTERRUPT_PIN)) != 0) {
+        LOG_INFO("[IrrigationOverlay] IMU deep-sleep test PASS: GPIO%d woke the ESP32-S3 "
+                 "(wake_count=%u mask=0x%llx)",
+                 IRRIGATION_IMU_INTERRUPT_PIN, imu_test_deep_sleep_wake_count,
+                 static_cast<unsigned long long>(wake_mask));
+      } else {
+        LOG_WARN("[IrrigationOverlay] IMU deep-sleep test FAIL: EXT1 wake mask does not contain "
+                 "GPIO%d (mask=0x%llx)",
+                 IRRIGATION_IMU_INTERRUPT_PIN, static_cast<unsigned long long>(wake_mask));
+      }
+
+      imuTestState_ = ImuTestState::COMPLETE;
+      return;
+    }
+
+    if (wake_cause != ESP_SLEEP_WAKEUP_UNDEFINED) {
+      LOG_WARN("[IrrigationOverlay] IMU deep-sleep test: boot wake cause=%d, starting a new test cycle",
+               static_cast<int>(wake_cause));
+    }
+
+    if (Throttle::isWithinTimespanMs(imuTestStateStartedMs_, k_imu_test_init_delay_ms)) {
+      return;
+    }
+
+    if (imuTestLastInitAttemptMs_ != 0 &&
+        Throttle::isWithinTimespanMs(imuTestLastInitAttemptMs_, k_imu_test_init_retry_ms)) {
+      return;
+    }
+
+    imuTestLastInitAttemptMs_ = now_ms;
+    if (initializeImuTest()) {
+      imuTestState_ = ImuTestState::WAIT_FOR_AWAKE_INTERRUPT;
+      imuTestStateStartedMs_ = now_ms;
+    }
+    return;
+  }
+
+  if (imuTestState_ == ImuTestState::WAIT_FOR_AWAKE_INTERRUPT) {
+    if (imu_test_interrupt_pending || digitalRead(IRRIGATION_IMU_INTERRUPT_PIN) == LOW) {
+      handleImuTestInterrupt();
+    }
+    return;
+  }
+
+  if (imuTestState_ == ImuTestState::WAIT_FOR_DEEP_SLEEP &&
+      !Throttle::isWithinTimespanMs(imuTestStateStartedMs_, IRRIGATION_IMU_TEST_SLEEP_DELAY_MS)) {
+    enterImuTestDeepSleep();
+  }
+}
+
+bool IrrigationOverlayModule::initializeImuTest() {
+  LOG_INFO("[IrrigationOverlay] IMU test 2/3: probing ICM-20948 on SDA=%d SCL=%d; "
+           "INT1 must be wired to GPIO%d",
+           I2C_SDA, I2C_SCL, IRRIGATION_IMU_INTERRUPT_PIN);
+
+  Wire.begin(I2C_SDA, I2C_SCL);
+  Wire.setClock(400000);
+
+  bool found = false;
+  for (bool ad0_high : {false, true}) {
+    imu_test_sensor.begin(Wire, ad0_high);
+    if (imu_test_sensor.status == ICM_20948_Stat_Ok) {
+      LOG_INFO("[IrrigationOverlay] IMU test: ICM-20948 found at address 0x%02x", ad0_high ? 0x69 : 0x68);
+      found = true;
+      break;
+    }
+  }
+
+  if (!found) {
+    LOG_WARN("[IrrigationOverlay] IMU test: ICM-20948 not found; retrying in %u ms", k_imu_test_init_retry_ms);
+    return false;
+  }
+
+  if (!imu_test_status_ok(imu_test_sensor.swReset(), "software reset")) {
+    return false;
+  }
+  delay(250);
+
+  if (!imu_test_status_ok(imu_test_sensor.sleep(false), "wake sensor") ||
+      !imu_test_status_ok(imu_test_sensor.lowPower(false), "disable low power") ||
+      !imu_test_status_ok(
+          imu_test_sensor.setSampleMode(ICM_20948_Internal_Acc | ICM_20948_Internal_Gyr,
+                                        ICM_20948_Sample_Mode_Cycled),
+          "set cycled sample mode") ||
+      !imu_test_status_ok(imu_test_sensor.cfgIntActiveLow(true), "set INT active low") ||
+      !imu_test_status_ok(imu_test_sensor.cfgIntOpenDrain(true), "set INT open drain") ||
+      !imu_test_status_ok(imu_test_sensor.cfgIntLatch(true), "latch INT") ||
+      !imu_test_status_ok(imu_test_sensor.cfgIntAnyReadToClear(false), "disable any-read clear") ||
+      !imu_test_status_ok(imu_test_sensor.WOMThreshold(IRRIGATION_IMU_TEST_WOM_THRESHOLD), "set WOM threshold") ||
+      !imu_test_status_ok(imu_test_sensor.WOMLogic(true, 1), "set WOM logic") ||
+      !imu_test_status_ok(imu_test_sensor.clearInterrupts(), "clear pending interrupts") ||
+      !imu_test_status_ok(imu_test_sensor.intEnableWOM(true), "enable WOM interrupt")) {
+    return false;
+  }
+
+  pinMode(IRRIGATION_IMU_INTERRUPT_PIN, INPUT_PULLUP);
+  imu_test_interrupt_pending = false;
+  attachInterrupt(digitalPinToInterrupt(IRRIGATION_IMU_INTERRUPT_PIN), irrigation_imu_test_isr, FALLING);
+
+  LOG_INFO("[IrrigationOverlay] IMU awake test READY: move the board. "
+           "WOM threshold=%u (~%u mg), INT=active-low open-drain",
+           IRRIGATION_IMU_TEST_WOM_THRESHOLD, IRRIGATION_IMU_TEST_WOM_THRESHOLD * 4);
+  return true;
+}
+
+void IrrigationOverlayModule::handleImuTestInterrupt() {
+  noInterrupts();
+  imu_test_interrupt_pending = false;
+  interrupts();
+
+  const int asserted_level = digitalRead(IRRIGATION_IMU_INTERRUPT_PIN);
+  const bool cleared = imu_test_status_ok(imu_test_sensor.clearInterrupts(), "clear WOM interrupt");
+  delay(10);
+  const int cleared_level = digitalRead(IRRIGATION_IMU_INTERRUPT_PIN);
+
+  if (asserted_level == LOW && cleared && cleared_level == HIGH) {
+    LOG_INFO("[IrrigationOverlay] IMU awake test PASS: GPIO%d asserted LOW and returned HIGH "
+             "after ICM interrupt clear",
+             IRRIGATION_IMU_INTERRUPT_PIN);
+  } else {
+    LOG_WARN("[IrrigationOverlay] IMU awake test FAIL: GPIO%d asserted_level=%d clear_ok=%d "
+             "cleared_level=%d",
+             IRRIGATION_IMU_INTERRUPT_PIN, asserted_level, cleared ? 1 : 0, cleared_level);
+    return;
+  }
+
+  detachInterrupt(digitalPinToInterrupt(IRRIGATION_IMU_INTERRUPT_PIN));
+  imuTestState_ = ImuTestState::WAIT_FOR_DEEP_SLEEP;
+  imuTestStateStartedMs_ = millis();
+  LOG_INFO("[IrrigationOverlay] IMU deep-sleep test ARMED: keeping the board still for %u ms, "
+           "then sleeping until motion",
+           IRRIGATION_IMU_TEST_SLEEP_DELAY_MS);
+}
+
+void IrrigationOverlayModule::enterImuTestDeepSleep() {
+  if (!imu_test_status_ok(imu_test_sensor.clearInterrupts(), "clear interrupt before deep sleep")) {
+    imuTestStateStartedMs_ = millis();
+    return;
+  }
+
+  delay(10);
+  if (digitalRead(IRRIGATION_IMU_INTERRUPT_PIN) == LOW) {
+    LOG_WARN("[IrrigationOverlay] IMU deep-sleep test postponed: GPIO%d is still LOW; "
+             "keep the board still",
+             IRRIGATION_IMU_INTERRUPT_PIN);
+    imuTestStateStartedMs_ = millis();
+    return;
+  }
+
+  pinMode(IRRIGATION_IMU_INTERRUPT_PIN, INPUT_PULLUP);
+  gpio_pullup_en(k_imu_test_gpio);
+  gpio_pulldown_dis(k_imu_test_gpio);
+  esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);
+
+  const esp_err_t wake_status =
+      esp_sleep_enable_ext1_wakeup(1ULL << IRRIGATION_IMU_INTERRUPT_PIN, ESP_EXT1_WAKEUP_ANY_LOW);
+  if (wake_status != ESP_OK) {
+    LOG_WARN("[IrrigationOverlay] IMU deep-sleep test FAIL: could not arm GPIO%d, esp_err=%d",
+             IRRIGATION_IMU_INTERRUPT_PIN, static_cast<int>(wake_status));
+    imuTestState_ = ImuTestState::COMPLETE;
+    return;
+  }
+
+  LOG_INFO("[IrrigationOverlay] IMU deep-sleep test: entering deep sleep now; "
+           "move the board to wake it via GPIO%d",
+           IRRIGATION_IMU_INTERRUPT_PIN);
+  Serial.flush();
+  delay(100);
+  esp_deep_sleep_start();
+}
+#endif
 
 void IrrigationOverlayModule::ensureInitialized() {
   if (initialized_) {

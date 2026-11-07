@@ -5,6 +5,7 @@
 #include "DebugConfiguration.h"
 
 #include <cmath>
+#include <utility>
 
 namespace {
 constexpr uint64_t k_gateway_flush_interval_ms = 2000;
@@ -218,7 +219,7 @@ bool IrrigationModule::on_packet_rx(const String &payload_json, uint64_t now_ms)
 
     PendingGatewayRx pending_rx;
     pending_rx.payload_json = payload_json;
-    pending_gateway_rx_.push_back(pending_rx);
+    pending_gateway_rx_.push_back(std::move(pending_rx));
     return true;
   }
 
@@ -619,14 +620,14 @@ void IrrigationModule::remember_last_good_fix(const IrrigationSensorSample &samp
 void IrrigationModule::process_gateway_ingress(uint64_t now_ms, size_t max_messages) {
   size_t processed_count = 0;
   while (processed_count < max_messages && !pending_gateway_rx_.empty()) {
-    const PendingGatewayRx next_item = pending_gateway_rx_.front();
-    pending_gateway_rx_.erase(pending_gateway_rx_.begin());
+    const PendingGatewayRx &next_item = pending_gateway_rx_.front();
 
     IrrigationTelemetryEvent event;
     if (!irrigation_event_from_json(next_item.payload_json, event)) {
       const String preview = next_item.payload_json.substring(0, 96);
       LOG_WARN("Irrigation gateway drop: invalid payload_json bytes=%u preview=%s",
                next_item.payload_json.length(), preview.c_str());
+      pending_gateway_rx_.erase(pending_gateway_rx_.begin());
       processed_count++;
       continue;
     }
@@ -644,9 +645,12 @@ void IrrigationModule::process_gateway_ingress(uint64_t now_ms, size_t max_messa
       } else {
         LOG_WARN("Irrigation gateway fallback publish failed: msg_id=%s topic=%s",
                  event.msg_id.c_str(), topic.c_str());
+        // Keep the record until a later tick can reconnect with no decoded event alive.
+        break;
       }
     }
 
+    pending_gateway_rx_.erase(pending_gateway_rx_.begin());
     processed_count++;
   }
 }
