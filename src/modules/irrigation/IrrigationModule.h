@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "IrrigationConfig.h"
+#include "IrrigationCommandStore.h"
 #include "IrrigationGatewayStore.h"
 #include "IrrigationMotionDetector.h"
 #include "IrrigationMqttUplink.h"
@@ -58,6 +59,8 @@ class IrrigationModule {
   void maybe_publish_heartbeat(uint64_t now_ms);
   void process_post_motion_fix(uint64_t now_ms);
   bool handle_command(const IrrigationCommand &command, uint64_t now_ms);
+  bool build_command_result_payload(const String &command_id, bool accepted, uint64_t now_ms,
+                                    String &payload_json, const IrrigationCommand *prospective = nullptr);
   bool enqueue_command_result(const String &command_id, bool accepted, uint64_t now_ms);
   bool enqueue_profile_status(IrrigationPublishReason publish_reason, uint64_t now_ms);
   void set_valve_output(bool open);
@@ -102,14 +105,17 @@ class IrrigationModule {
   bool valve_open_;
   bool last_command_accepted_;
   bool config_update_pending_;
+  bool command_store_ready_;
   uint64_t motion_cycle_start_ms_;
   uint64_t settle_confirm_due_ms_;
   uint32_t sequence_;
+  uint64_t boot_nonce_;
   uint8_t stable_fix_sample_count_;
   EndpointLifecycleState endpoint_state_;
 
   IrrigationMotionDetector motion_detector_;
   IrrigationGatewayStore gateway_store_;
+  IrrigationCommandStore command_store_;
   IrrigationMqttUplink mqtt_uplink_;
 
   std::vector<PendingMeshTx> pending_mesh_tx_;

@@ -571,7 +571,8 @@ bool IrrigationOverlayModule::trySendPendingMeshTx() {
     }
 
     meshtastic_MeshPacket *packet = allocDataPacket();
-    const size_t max_payload = sizeof(packet->decoded.payload.bytes);
+    static_assert(sizeof(packet->decoded.payload.bytes) >= k_irrigation_mesh_payload_max, "Irrigation radio capacity changed");
+    const size_t max_payload = k_irrigation_mesh_payload_max;
     const size_t raw_payload_len = payload_json.length();
     const bool truncated = raw_payload_len > max_payload;
     const size_t payload_len = std::min(raw_payload_len, max_payload);

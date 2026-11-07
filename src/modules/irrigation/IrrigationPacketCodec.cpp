@@ -1,5 +1,8 @@
 #include "IrrigationPacketCodec.h"
 
+#include <SHA256.h>
+
+#include <cmath>
 #include <cstdio>
 
 namespace {
@@ -210,7 +213,28 @@ IrrigationTimeQuality irrigation_time_quality_from_string(const String &value) {
   return IrrigationTimeQuality::UNKNOWN;
 }
 
+String irrigation_message_id(const String &tracker_id, uint64_t timestamp, uint64_t uptime,
+                             uint32_t sequence, uint64_t boot_nonce) {
+  const String source = tracker_id + "|" + format_u64(timestamp) + "|" + format_u64(uptime) +
+                        "|" + String(sequence) + "|" + format_u64(boot_nonce);
+  uint8_t digest[32];
+  SHA256 hash;
+  hash.reset();
+  hash.update(source.c_str(), source.length());
+  hash.finalize(digest, sizeof(digest));
+  static const char hex[] = "0123456789abcdef";
+  String identifier;
+  identifier.reserve(32);
+  for (size_t index = 0; index < 16; ++index) {
+    identifier += hex[digest[index] >> 4];
+    identifier += hex[digest[index] & 15];
+  }
+  return identifier;
+}
+
 bool irrigation_event_to_json(const IrrigationTelemetryEvent &event, String &output_json) {
+  const bool command_result = event.publish_reason == IrrigationPublishReason::COMMAND_ACK ||
+                              event.publish_reason == IrrigationPublishReason::COMMAND_REJECTED;
   output_json = "{";
   output_json += "\"i\":" + quote(event.msg_id) + ",";
   output_json += "\"t\":" + format_u64(event.ts_utc_ms) + ",";
@@ -218,34 +242,57 @@ bool irrigation_event_to_json(const IrrigationTelemetryEvent &event, String &out
   output_json += "\"l\":" + quote(event.line_id) + ",";
   output_json += "\"e\":" + quote(event.endpoint_role) + ",";
   output_json += "\"n\":" + quote(irrigation_node_profile_to_string(event.node_profile)) + ",";
-  output_json += "\"p\":" + quote(irrigation_publish_reason_to_string(event.publish_reason)) + ",";
-  output_json += "\"a\":" + format_decimal(event.lat, k_lat_lon_precision) + ",";
-  output_json += "\"o\":" + format_decimal(event.lon, k_lat_lon_precision) + ",";
-  output_json += "\"m\":" + quote(irrigation_motion_state_to_string(event.motion_state)) + ",";
-  output_json += "\"f\":";
-  output_json += event.fix ? "1" : "0";
-  output_json += ",";
-  output_json += "\"s\":";
-  output_json += event.stale ? "1" : "0";
-  output_json += ",";
-  output_json += "\"d\":" + format_decimal(event.heading_deg, 1) + ",";
-  output_json += "\"v\":";
-  output_json += event.heading_valid ? "1" : "0";
-  output_json += ",";
-  output_json += "\"b\":" + String(event.battery_mv) + ",";
-  output_json += "\"q\":" + quote(irrigation_time_quality_to_string(event.time_quality)) + ",";
-  output_json += "\"h\":" + String(event.hop_count);
-  if (!event.command_id.isEmpty()) {
+  output_json += "\"p\":" + quote(irrigation_publish_reason_to_string(event.publish_reason));
+  if (command_result) {
     output_json += ",\"c\":" + quote(event.command_id);
+  } else {
+    if (!std::isfinite(event.lat) || !std::isfinite(event.lon) ||
+        event.lat < -90 || event.lat > 90 || event.lon < -180 || event.lon > 180) {
+      output_json = "";
+      return false;
+    }
+    output_json += ",\"a\":" + format_decimal(event.lat, k_lat_lon_precision);
+    output_json += ",\"o\":" + format_decimal(event.lon, k_lat_lon_precision);
+    if (event.motion_state == IrrigationMotionState::MOVING) {
+      output_json += ",\"m\":\"M\"";
+    }
+    if (event.fix) {
+      output_json += ",\"f\":1";
+    }
+    if (event.stale) {
+      output_json += ",\"s\":1";
+    }
   }
   if (event.has_valve_state) {
-    output_json += ",\"w\":";
-    output_json += event.valve_open ? "1" : "0";
+    output_json += event.valve_open ? ",\"w\":1" : ",\"w\":0";
   }
   if (event.has_position_interval) {
     output_json += ",\"u\":" + String(event.position_interval_sec);
   }
+  const auto append_optional = [&output_json](const String &fields) {
+    if (output_json.length() + fields.length() + 1 <= k_irrigation_mesh_payload_max) {
+      output_json += fields;
+    }
+  };
+  if (event.battery_mv != 0) {
+    append_optional(",\"b\":" + String(event.battery_mv));
+  }
+  if (event.time_quality != IrrigationTimeQuality::UNKNOWN) {
+    append_optional(",\"q\":" + quote(irrigation_time_quality_to_string(event.time_quality)));
+  }
+  if (!command_result) {
+    if (event.heading_valid && std::isfinite(event.heading_deg)) {
+      append_optional(",\"d\":" + format_decimal(event.heading_deg, 1) + ",\"v\":1");
+    }
+    if (event.hop_count != 0) {
+      append_optional(",\"h\":" + String(event.hop_count));
+    }
+  }
   output_json += "}";
+  if (output_json.length() > k_irrigation_mesh_payload_max) {
+    output_json = "";
+    return false;
+  }
   return true;
 }
 

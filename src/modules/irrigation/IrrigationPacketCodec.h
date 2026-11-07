@@ -4,6 +4,11 @@
 
 #include "IrrigationTypes.h"
 
+constexpr size_t k_irrigation_mesh_payload_max = 233;
+
+String irrigation_message_id(const String &tracker_id, uint64_t timestamp, uint64_t uptime,
+                             uint32_t sequence, uint64_t boot_nonce);
+
 String irrigation_motion_state_to_string(IrrigationMotionState motion_state);
 IrrigationMotionState irrigation_motion_state_from_string(const String &value);
 String irrigation_publish_reason_to_string(IrrigationPublishReason publish_reason);
