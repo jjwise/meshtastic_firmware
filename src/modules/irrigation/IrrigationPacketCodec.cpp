@@ -84,9 +84,15 @@ String format_decimal(double value, uint8_t precision) {
 }
 
 String format_u64(uint64_t value) {
-  char buffer[24];
-  snprintf(buffer, sizeof(buffer), "%llu", static_cast<unsigned long long>(value));
-  return String(buffer);
+  // Reduced embedded printf implementations may not support %llu.
+  char buffer[21];
+  char *cursor = buffer + sizeof(buffer);
+  *--cursor = '\0';
+  do {
+    *--cursor = static_cast<char>('0' + value % 10);
+    value /= 10;
+  } while (value != 0);
+  return String(cursor);
 }
 }  // namespace
 

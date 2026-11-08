@@ -122,3 +122,73 @@ accepts all four fixtures, including UUID, profile, valve state and tracker inte
 
 Builds without the real command key are compilation checks only, not provisioned
 images for deployment. No hardware has been flashed or actuated.
+
+## Follow-up: real ESP32 timestamp and MQTT farm (8 November 2026)
+
+A real valve capture contained `"t":lu`, so its JSON was rejected before the node
+could be registered. The codec's `%llu` call has been replaced by a bounded,
+printf-independent decimal conversion, including zero and UINT64_MAX. The same
+conversion is used in the message-ID input for timestamps, uptime and boot nonce.
+The command HMAC code is unchanged; the installed ESP32 Arduino String uint64
+constructor uses its own division-based ulltoa rather than printf.
+
+The host harness now wraps snprintf at link time and deliberately returns `lu`
+for unsupported long-long formats. A probe verifies that the simulation is active;
+production packets must still round-trip all tested uint64 timestamps and parse
+as JSON integers. This closes the gap left by the desktop printf implementation,
+which accepted `%llu` in the earlier tests. The simulation reproduces the reported
+symptom, rather than claiming that all SDK Nano formatting details are emulated.
+The local SDK configuration does not itself enable NEWLIB_NANO_FORMAT; the exact
+runtime printf configuration on the remote valve has not been measured here.
+
+The gateway profile now explicitly defines IRRIGATION_FARM_ID as farm_01, matching
+the deployed profiles and inspected ACL. Build overrides run after loading the
+persisted irrigation config, so a stored farm_demo does not require deleting
+configuration or replay-protection state. The gateway constructs the MQTT farm
+prefix; flashing only the valve will not change that prefix. Reflash hwt_gw to
+apply the topic change. The generic demo defaults are retained for other uses.
+
+This change does not manufacture a GPS fix. A valve transmitting (0, 0) without
+fix may be listed by the backend, but a map marker still needs a valid position.
+
+During this follow-up, the command secrets header is present locally. Its value
+is masked and untouched; matching it to the API key remains a provisioning check.
+The ESP32 on COM4 was identified by the operator as the gateway, not the valve.
+No automatic flash has been performed as part of the source correction.
+
+Follow-up builds succeeded: hwt_valve (RAM 37.6%, flash 51.7%) and hwt_gw
+(RAM 35.9%, flash 49.0%). The final codec objects and gateway build flag were
+checked. The snprintf regression fails with the previous formatter and passes
+with the new conversion; backend normalization and the HMAC reference also pass.
+The secret headers are byte-for-byte unchanged. Hardware flash/serial validation
+of the new valve packet remains an operator step on the machine with that valve.
+
+
+## Follow-up: ESP32 checkpoint implementation (8 November 2026)
+
+A signed opening for 300 seconds was rejected even though the device timestamp
+was within the two-minute command window. Inspection of the local ESP32 valve
+object showed that IrrigationCommandStore::load/save had no NVS references and
+returned false unconditionally. This translation unit included Arduino.h but
+not configuration.h, which supplies the project's ARCH_ESP32 definition through
+architecture.h. Its non-ESP32 fallback was compiled on the ESP32.
+
+IrrigationCommandStore.cpp now includes configuration.h before its architecture
+guards. The host harness defines only ARDUINO_ARCH_ESP32, as the platform does;
+its configuration stub supplies ARCH_ESP32 only when explicitly included.
+DebugConfiguration.h includes that stub just as the production header does.
+This prevents the former global -DARCH_ESP32 from masking missing includes.
+
+Failed command checks also log time/order validity, checkpoint success, configured
+pin and duration limits. These diagnostics contain no HMAC key or signature.
+The durable record format, signing contract and GPIO safety checks are unchanged.
+No NVS erase or hardware flash is part of this correction.
+
+Validation: the corrected host suite passes, including valid commands, persistent
+replay rejection, storage faults, GPIO closure and the independent HMAC reference.
+The old command-store file fails the same platform-aware test on the first valid
+opening (unused-parameter warnings were disabled only in the isolated negative
+control). Both hwt_valve and hwt_tracker builds succeed; their fresh ESP32 objects
+reference nvs_open/get_blob/set_blob/commit/close and depend on configuration.h,
+architecture.h and nvs.h. These checks establish compilation and simulated
+behavior, not physical valve actuation. The generated secret headers are unchanged.

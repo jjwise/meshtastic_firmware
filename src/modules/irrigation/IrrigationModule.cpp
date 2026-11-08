@@ -443,6 +443,13 @@ bool IrrigationModule::handle_command(const IrrigationCommand &command, uint64_t
     }
     last_command_accepted_ = true;
   }
+  if (!accepted) {
+    LOG_WARN("Irrigation command rejection checks: command_id=%s time_valid=%d order_valid=%d checkpoint_saved=%d "
+             "pin=%d duration_sec=%u max_open_sec=%u",
+             command.command_id.c_str(), valid_time ? 1 : 0, command_order_valid ? 1 : 0,
+             checkpoint_saved ? 1 : 0, static_cast<int>(config_.valve_control_pin),
+             static_cast<unsigned int>(command.duration_sec), static_cast<unsigned int>(config_.valve_max_open_sec));
+  }
   enqueue_command_result(command.command_id, accepted, now_ms);
   LOG_WARN("Irrigation command handled: command_id=%s profile=%s accepted=%d",
            command.command_id.c_str(), profile_to_cstr(config_.node_profile), accepted ? 1 : 0);

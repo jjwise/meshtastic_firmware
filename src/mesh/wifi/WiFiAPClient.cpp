@@ -4,6 +4,7 @@
 #include "RTC.h"
 #include "concurrency/Periodic.h"
 #include "mesh/wifi/WiFiAPClient.h"
+#include "modules/irrigation/IrrigationWiFiBootstrap.h"
 
 #include "main.h"
 #include "mesh/api/WiFiServerAPI.h"
@@ -222,6 +223,11 @@ static void onNetworkConnected()
 
 static int32_t reconnectWiFi()
 {
+#if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
+    if (advanceIrrigationGatewayWiFi(WiFi.isConnected())) {
+        needReconnect = true;
+    }
+#endif
     const char *wifiName = config.network.wifi_ssid;
     const char *wifiPsw = config.network.wifi_psk;
 
@@ -239,7 +245,11 @@ static int32_t reconnectWiFi()
 #elif defined(ARCH_RP2040)
         WiFi.disconnect(false);
 #endif
+#if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
+        LOG_INFO("Reconnecting to gateway WiFi access point");
+#else
         LOG_INFO("Reconnecting to WiFi access point %s", wifiName);
+#endif
 
         // Start the non-blocking wait for 5 seconds
         wifiReconnectStartMillis = millis();
@@ -396,7 +406,11 @@ bool initWifi()
             createSSLCert(); // For WebServer - called after WiFi.onEvent() to avoid race condition
 #endif
 #endif
+#if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
+            LOG_DEBUG("JOINING gateway WIFI soon");
+#else
             LOG_DEBUG("JOINING WIFI soon: ssid=%s", wifiName);
+#endif
             wifiReconnect = new Periodic("WifiConnect", reconnectWiFi);
         }
         return true;

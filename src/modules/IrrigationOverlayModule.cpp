@@ -13,6 +13,7 @@
 #include "mesh/Channels.h"
 #include "modules/irrigation/IrrigationConfigStore.h"
 #include "modules/irrigation/IrrigationSecrets.h"
+#include "modules/irrigation/IrrigationWiFiBootstrap.h"
 #include "gps/RTC.h"
 
 #include <algorithm>
@@ -129,6 +130,9 @@ void apply_build_overrides(IrrigationConfig &cfg) {
 #endif
 #ifdef IRRIGATION_WIFI_PASSWORD
   cfg.wifi_password = IRRIGATION_WIFI_PASSWORD;
+#endif
+#if defined(ARCH_ESP32) && defined(IRRIGATION_ENABLE_MQTT_UPLINK)
+  applyIrrigationGatewayWiFiConfig(cfg);
 #endif
 #ifdef IRRIGATION_MQTT_HOST
   cfg.mqtt_host = IRRIGATION_MQTT_HOST;

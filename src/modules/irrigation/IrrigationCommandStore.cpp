@@ -1,5 +1,7 @@
 #include "IrrigationCommandStore.h"
 
+#include "configuration.h"
+
 #include <cstring>
 
 #ifdef ARCH_ESP32

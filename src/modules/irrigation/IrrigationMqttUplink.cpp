@@ -264,25 +264,7 @@ int IrrigationTlsClient::connect(const char *host, uint16_t port) {
   return 1;
 }
 
-void applyIrrigationGatewayWiFiBootstrap() {
-#ifdef IRRIGATION_WIFI_SSID
-  if (IRRIGATION_WIFI_SSID[0] == '\0') {
-    return;
-  }
 
-  ::config.network.wifi_enabled = true;
-  strncpy(::config.network.wifi_ssid, IRRIGATION_WIFI_SSID, sizeof(::config.network.wifi_ssid) - 1);
-  ::config.network.wifi_ssid[sizeof(::config.network.wifi_ssid) - 1] = '\0';
-#ifdef IRRIGATION_WIFI_PASSWORD
-  strncpy(::config.network.wifi_psk, IRRIGATION_WIFI_PASSWORD, sizeof(::config.network.wifi_psk) - 1);
-  ::config.network.wifi_psk[sizeof(::config.network.wifi_psk) - 1] = '\0';
-#else
-  ::config.network.wifi_psk[0] = '\0';
-#endif
-  LOG_INFO("Irrigation gateway WiFi credentials applied before native startup: ssid=%s",
-           ::config.network.wifi_ssid);
-#endif
-}
 #endif
 
 IrrigationMqttUplink::IrrigationMqttUplink()
@@ -370,6 +352,7 @@ bool IrrigationMqttUplink::ensure_native_wifi_started() {
     return false;
   }
 
+  applyIrrigationGatewayWiFiBootstrap();
   config.network.wifi_enabled = true;
   strncpy(config.network.wifi_ssid, config_.wifi_ssid.c_str(), sizeof(config.network.wifi_ssid) - 1);
   config.network.wifi_ssid[sizeof(config.network.wifi_ssid) - 1] = '\0';
@@ -389,7 +372,7 @@ bool IrrigationMqttUplink::ensure_native_wifi_started() {
     LOG_WARN("Irrigation WiFi bootstrap failed: wifi_enabled=%d ssid_len=%u",
              config.network.wifi_enabled ? 1 : 0, strlen(config.network.wifi_ssid));
   } else {
-    LOG_INFO("Irrigation WiFi bootstrap: ssid=%s", config.network.wifi_ssid);
+    LOG_INFO("Irrigation WiFi bootstrap started");
   }
   return native_wifi_started_;
 #else
@@ -583,8 +566,7 @@ bool IrrigationMqttUplink::ensure_wifi_connected(uint64_t now_ms) {
   if (wifi_status == WL_CONNECTED) {
     if (!wifi_reported_connected_) {
       wifi_reported_connected_ = true;
-      LOG_INFO("Irrigation WiFi connected: ssid=%s ip=%s",
-               config_.wifi_ssid.c_str(), WiFi.localIP().toString().c_str());
+      LOG_INFO("Irrigation WiFi connected: ip=%s", WiFi.localIP().toString().c_str());
     }
     return true;
   }
@@ -603,8 +585,8 @@ bool IrrigationMqttUplink::ensure_wifi_connected(uint64_t now_ms) {
   if (wifiReconnect != nullptr) {
     wifiReconnect->setIntervalFromNow(0);
   }
-  LOG_INFO("Irrigation WiFi waiting for connect: ssid=%s status=%d(%s)",
-           config_.wifi_ssid.c_str(), wifi_status, wifi_status_name(wifi_status));
+  LOG_INFO("Irrigation WiFi waiting for connect: status=%d(%s)",
+           wifi_status, wifi_status_name(wifi_status));
   return false;
 #else
   (void)now_ms;

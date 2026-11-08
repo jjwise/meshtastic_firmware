@@ -87,9 +87,22 @@ TEST = r"""
 #include "IrrigationModule.h"
 #include "IrrigationCommandAuth.h"
 #include <cassert>
+#include <cstdarg>
 #include <iostream>
 #include <limits>
 #include <set>
+
+extern "C" int __wrap_snprintf(char *buffer, size_t size, const char *format, ...) {
+ // Reproduce the unsupported long-long formatting observed on the ESP32 build.
+ if (strstr(format,"ll") != nullptr) {
+  if (size > 0) {
+   const char *unsupported="lu";
+   size_t count=std::min(size-1,size_t(2));memcpy(buffer,unsupported,count);buffer[count]=0;
+  }
+  return 2;
+ }
+ va_list args;va_start(args,format);int count=vsnprintf(buffer,size,format,args);va_end(args);return count;
+}
 
 void digitalWrite(int pin,int level){
  assert(pin==4);
@@ -160,6 +173,7 @@ void test_packets(){
    String s;assert(irrigation_event_to_json(e,s));assert(s.length()<=233);
    IrrigationTelemetryEvent decoded{};assert(irrigation_event_from_json(s,decoded));assert(decoded.fix && decoded.stale);
    assert(decoded.motion_state==IrrigationMotionState::MOVING);assert(decoded.lat==e.lat && decoded.lon==e.lon);
+   assert(decoded.ts_utc_ms==t);
    e.publish_reason=IrrigationPublishReason::COMMAND_ACK;e.command_id=uuid;
    for(size_t n:{size_t(1),size_t(16),size_t(24)}){
     e.tracker_id=String(n,'r');e.line_id=String(n,'l');e.endpoint_role="VALVE";
@@ -247,6 +261,8 @@ void test_storage_failures(){
  std::cout<<"PASS persistence faults: corrupt state, NVS open/read/write/commit/readback failures, power cut after commit before GPIO, unrepresentable ACK fails closed\n";
 }
 int main(){
+ char probe[24];snprintf(probe,sizeof(probe),"%llu",18446744073709551615ULL);assert(String(probe)=="lu");
+ std::cout<<"PASS embedded printf simulation reproduces unsupported %llu as lu\n";
  IrrigationCommand c{};assert(irrigation_command_from_json(command(),c));
  std::cout<<"SIGNATURE|"<<irrigation_command_signature(c,key)<<"\n";
  test_packets();test_commands();test_storage_failures();
@@ -265,8 +281,8 @@ def main():
         for name, content in {
             "Arduino.h": ARDUINO, "nvs.h": NVS,
             "esp_system.h": "#pragma once\n#include <cstdint>\ninline uint32_t esp_random(){ static uint32_t n=0; return ++n; }\n",
-            "configuration.h": "#pragma once\n",
-            "DebugConfiguration.h": "#pragma once\ntemplate<class... T> void log_ignore(T...){ }\n#define LOG_WARN(...) log_ignore(__VA_ARGS__)\n#define LOG_INFO(...) log_ignore(__VA_ARGS__)\n#define LOG_ERROR(...) log_ignore(__VA_ARGS__)\n",
+            "configuration.h": "#pragma once\n#ifdef ARDUINO_ARCH_ESP32\n#define ARCH_ESP32\n#endif\n",
+            "DebugConfiguration.h": "#pragma once\n#include \"configuration.h\"\ntemplate<class... T> void log_ignore(T...){ }\n#define LOG_WARN(...) log_ignore(__VA_ARGS__)\n#define LOG_INFO(...) log_ignore(__VA_ARGS__)\n#define LOG_ERROR(...) log_ignore(__VA_ARGS__)\n",
             "test.cpp": TEST,
         }.items():
             (directory / name).write_text(content)
@@ -276,7 +292,7 @@ def main():
             "IrrigationCommandStore", "IrrigationMotionDetector")]
         sources.extend(crypto / name for name in ("SHA256.cpp", "Hash.cpp", "Crypto.cpp"))
         binary = directory / "test"
-        subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-Wno-sign-compare", "-DARCH_ESP32",
+        subprocess.run(["g++", "-std=c++17", "-Wall", "-Wextra", "-Werror", "-Wno-sign-compare", "-DARDUINO_ARCH_ESP32", "-fno-builtin-snprintf", "-Wl,--wrap=snprintf",
                         "-I", str(directory), "-I", str(module), "-I", str(crypto),
                         str(directory / "test.cpp"), *(str(p) for p in sources), "-o", str(binary)], check=True)
         result = subprocess.run([str(binary)], text=True, capture_output=True)
@@ -290,6 +306,7 @@ def main():
                 _, label, raw = line.split("|", 2)
                 event = json.loads(raw)
                 assert len(raw.encode()) <= 233
+                assert isinstance(event["t"], int), "Timestamp must be an unquoted JSON integer"
                 if event["p"] in ("A", "R"):
                     assert event["c"] == "12345678-1234-4567-89ab-123456789abc"
                     assert "a" not in event and "o" not in event
